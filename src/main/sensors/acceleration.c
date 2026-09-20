@@ -38,6 +38,9 @@
 #include "sensors/gyro.h"
 
 #include "acceleration.h"
+#ifdef USE_TELEMETRY_MAVLINK
+#include "telemetry/mavlink.h"
+#endif
 
 FAST_DATA_ZERO_INIT acc_t acc;                       // acc access functions
 #ifdef USE_CRSF_ACCGYRO_TELEMETRY
@@ -134,6 +137,9 @@ void accUpdate(timeUs_t currentTimeUs)
     calibrateAccelerometer();
     applyAccelerationTrims(accelerationRuntime.accelerationTrims);
     postProcessAccelerometer();
+#ifdef USE_TELEMETRY_MAVLINK
+    mavlinkCaptureImu();
+#endif
 
 #ifdef USE_CRSF_ACCGYRO_TELEMETRY
     // Skip accumulation if reset is in progress (resetSeq odd) to avoid corruption.

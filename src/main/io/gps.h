@@ -268,6 +268,11 @@ typedef struct gpsDateTime_s {
 
 typedef struct gpsSolutionData_s {
     gpsLocation_t llh;
+    int32_t altitudeEllipsoidMm;
+    uint8_t telemetryFixType; // MAVLink GPS_FIX_TYPE, 0 if not supplied
+    bool telemetryEllipsoidValid;
+    bool telemetryVelocityValid;
+    bool telemetryAccuracyValid;
     gpsDilution_t dop;
     gpsAccuracy_t acc;
     gpsVelned_t velned;

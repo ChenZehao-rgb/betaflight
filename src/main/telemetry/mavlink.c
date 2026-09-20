@@ -75,6 +75,7 @@
 
 #include "telemetry/telemetry.h"
 #include "telemetry/mavlink.h"
+#include "telemetry/mavlink_time.h"
 #if ENABLE_TELEMETRY_MAVLINK_MISSION
 #include "telemetry/mavlink_mission.h"
 #endif
@@ -90,8 +91,6 @@
 #pragma GCC diagnostic pop
 
 #define TELEMETRY_MAVLINK_INITIAL_PORT_MODE MODE_RXTX
-#define TELEMETRY_MAVLINK_MAXRATE 50
-#define TELEMETRY_MAVLINK_DELAY ((1000 * 1000) / TELEMETRY_MAVLINK_MAXRATE)
 
 #define MAVLINK_SYSTEM_ID 1
 #define MAVLINK_COMPONENT_ID MAV_COMP_ID_AUTOPILOT1
@@ -102,7 +101,6 @@ static const serialPortConfig_t *portConfig;
 
 static bool mavlinkTelemetryEnabled =  false;
 static portSharing_e mavlinkPortSharing;
-static uint32_t lastMavlinkMessageTime = 0;
 static armingDisableFlags_e lastArmingDisableFlags = 0;
 
 static mavlink_message_t mavRxMsg;
@@ -144,8 +142,83 @@ static const bfMavModeDescriptor_t bfMavModeDescriptors[BF_MAV_MODE_COUNT] = {
 static mavlink_message_t mavMsg;
 static uint8_t mavBuffer[MAVLINK_MAX_PACKET_LEN];
 
+// micros() wraps on 32-bit targets. All callers run in cooperative tasks.
+uint64_t mavlinkBootTimeUs(void)
+{
+    static mavlinkClock_t clock;
+    return mavlinkClockUpdate(&clock, (uint32_t)micros());
+}
+
+#ifdef USE_ACC
+static struct {
+    uint64_t time;
+    uint32_t sequence;
+    uint32_t gyroSequence;
+    float acceleration[3];
+    float rate[3];
+} imuSnapshot;
+
+void mavlinkCaptureImu(void)
+{
+    imuSnapshot.time = mavlinkBootTimeUs();
+    imuSnapshot.gyroSequence = gyroGetFilteredSequence();
+    for (unsigned axis = 0; axis < 3; ++axis) {
+        imuSnapshot.acceleration[axis] = acc.accADC.v[axis] * acc.dev.acc_1G_rec * 9.80665f;
+        imuSnapshot.rate[axis] = DEGREES_TO_RADIANS(gyro.gyroADCf[axis]);
+    }
+    ++imuSnapshot.sequence;
+}
+#endif
+
+#ifdef USE_GPS
+static uint16_t getHeadingCentidegrees(void);
+static uint16_t gpsSnapshotHeading;
+static uint16_t gpsPositionHeading;
+static gpsSolutionData_t gpsSnapshot;
+static uint64_t gpsSnapshotTime;
+static uint32_t gpsSnapshotSequence;
+static gpsSolutionData_t gpsPositionSnapshot;
+static uint64_t gpsPositionTime;
+static uint32_t gpsPositionSequence;
+void mavlinkCaptureGps(void)
+{
+    static bool seenUbxTime;
+    static uint32_t lastUbxTime;
+    if (gpsConfig()->provider == GPS_UBLOX) {
+        if (seenUbxTime && lastUbxTime == gpsSol.time) {
+            return;
+        }
+        lastUbxTime = gpsSol.time;
+        seenUbxTime = true;
+    }
+    gpsSnapshot = gpsSol;
+    gpsSnapshotHeading = getHeadingCentidegrees();
+    gpsSnapshotTime = mavlinkBootTimeUs();
+    ++gpsSnapshotSequence;
+    if (gpsConfig()->provider != GPS_UBLOX) {
+        gpsSnapshot.telemetryEllipsoidValid = false;
+        gpsSnapshot.telemetryAccuracyValid = false;
+        gpsSnapshot.telemetryVelocityValid = false;
+        gpsSnapshot.telemetryFixType = STATE(GPS_FIX) ? 3 : 1;
+#ifdef USE_VIRTUAL_GPS
+        gpsSnapshot.telemetryVelocityValid = STATE(GPS_FIX);
+#endif
+    }
+    if (!STATE(GPS_FIX)) {
+        gpsSnapshot.telemetryFixType = 1;
+        gpsSnapshot.telemetryVelocityValid = false;
+        gpsSnapshot.telemetryEllipsoidValid = false;
+        gpsSnapshot.telemetryAccuracyValid = false;
+    }
+}
+#endif
+
 static void mavlinkSerialWrite(uint8_t * buf, uint16_t length)
 {
+    // Never wait for UART space in the flight scheduler or emit partial frames.
+    if (serialTxBytesFree(mavlinkPort) < length) {
+        return;
+    }
     for (int i = 0; i < length; i++)
         serialWrite(mavlinkPort, buf[i]);
 }
@@ -278,7 +351,7 @@ static void handleTimesync(const mavlink_message_t *msg)
     }
 
     mavlink_msg_timesync_pack(MAVLINK_SYSTEM_ID, MAVLINK_COMPONENT_ID, &mavMsg,
-        (int64_t)micros() * 1000LL,
+        (int64_t)mavlinkBootTimeUs() * 1000LL,
         timesync.ts1,
         msg->sysid,
         msg->compid);
@@ -481,6 +554,11 @@ static void handleSetMessageInterval(const mavlink_command_long_t *cmd, uint8_t 
     bool success = false;
 
     if (!cmdParamToUint32(cmd->param1, UINT32_MAX, &msgId)) {
+        mavlinkSendCommandAck(cmd->command, MAV_RESULT_DENIED, targetSystem, targetComponent);
+        return;
+    }
+
+    if (!isfinite(cmd->param2) || cmd->param2 > (float)INT32_MAX) {
         mavlinkSendCommandAck(cmd->command, MAV_RESULT_DENIED, targetSystem, targetComponent);
         return;
     }
@@ -743,7 +821,8 @@ static void mavlinkSendGpsRaw(void)
     uint16_t msgLength;
     uint8_t gpsFixType = 0;
 
-    if (!sensors(SENSOR_GPS)) {
+    static uint32_t sentSequence;
+    if (!sensors(SENSOR_GPS) || !gpsSnapshotSequence || sentSequence == gpsSnapshotSequence) {
         return;
     }
 
@@ -751,7 +830,7 @@ static void mavlinkSendGpsRaw(void)
         gpsFixType = 1;
     }
     else {
-        if (gpsSol.numSat < GPS_MIN_SAT_COUNT) {
+        if (gpsSnapshot.numSat < GPS_MIN_SAT_COUNT) {
             gpsFixType = 2;
         }
         else {
@@ -759,35 +838,43 @@ static void mavlinkSendGpsRaw(void)
         }
     }
 
+    sentSequence = gpsSnapshotSequence;
+    // Keep the paired position/velocity message on the same solution even if
+    // another GPS update arrives between the two stream deadlines.
+    gpsPositionSnapshot = gpsSnapshot;
+    gpsPositionHeading = gpsSnapshotHeading;
+    gpsPositionTime = gpsSnapshotTime;
+    gpsPositionSequence = gpsSnapshotSequence;
+    gpsFixType = gpsSnapshot.telemetryFixType ? gpsSnapshot.telemetryFixType : gpsFixType;
     mavlink_msg_gps_raw_int_pack(MAVLINK_SYSTEM_ID, MAVLINK_COMPONENT_ID, &mavMsg,
         // time_usec Timestamp (microseconds since UNIX epoch or microseconds since system boot)
-        micros(),
+        gpsSnapshotTime,
         // fix_type 0-1: no fix, 2: 2D fix, 3: 3D fix. Some applications will not use the value of this field unless it is at least two, so always correctly fill in the fix.
         gpsFixType,
         // lat Latitude in 1E7 degrees
-        gpsSol.llh.lat,
+        gpsSnapshot.llh.lat,
         // lon Longitude in 1E7 degrees
-        gpsSol.llh.lon,
+        gpsSnapshot.llh.lon,
         // alt Altitude in 1E3 meters (millimeters) above MSL
-        gpsSol.llh.altCm * 10,
+        gpsSnapshot.llh.altCm * 10,
         // eph GPS HDOP horizontal dilution of position (unitless * 100). If unknown, set to: UINT16_MAX
-        gpsSol.dop.hdop,
+        gpsSnapshot.dop.hdop,
         // epv GPS VDOP vertical dilution of position (unitless * 100). If unknown, set to: UINT16_MAX
-        gpsSol.dop.vdop,
+        gpsSnapshot.dop.vdop,
         // vel GPS ground speed (m/s * 100). If unknown, set to: UINT16_MAX
-        gpsSol.groundSpeed,
+        gpsSnapshot.groundSpeed,
         // cog Course over ground (NOT heading, but direction of movement) in degrees * 100, 0.0..359.99 degrees. If unknown, set to: UINT16_MAX
-        gpsSol.groundCourse * 10,
+        gpsSnapshot.groundCourse * 10,
         // satellites_visible Number of satellites visible. If unknown, set to 255
-        gpsSol.numSat,
-        // Altitude [mm] (above WGS84, EGM96 ellipsoid). Positive for up.
-        gpsSol.llh.altCm * 10,
+        gpsSnapshot.numSat,
+        // Unknown ellipsoid altitude uses INT32_MIN in this firmware.
+        gpsSnapshot.telemetryEllipsoidValid ? gpsSnapshot.altitudeEllipsoidMm : INT32_MIN,
         // h_acc [mm] Position uncertainty
-        gpsSol.acc.hAcc,
+        gpsSnapshot.telemetryAccuracyValid ? gpsSnapshot.acc.hAcc : 0,
         // v_acc [mm] Altitude uncertainty
-        gpsSol.acc.vAcc,
+        gpsSnapshot.telemetryAccuracyValid ? gpsSnapshot.acc.vAcc : 0,
         // vel_acc [mm/s] Speed uncertainty
-        gpsSol.acc.sAcc,
+        gpsSnapshot.telemetryAccuracyValid ? gpsSnapshot.acc.sAcc : 0,
         // [degE5] Heading / track uncertainty - Unused
         UINT32_MAX,
         //Yaw in earth frame from north. Use 0 if this GPS does not provide yaw - Unused
@@ -803,37 +890,49 @@ static void mavlinkSendGpsRaw(void)
 
 static uint16_t getHeadingCentidegrees(void)
 {
-    return (uint16_t)(attitude.values.yaw * 10);
+    return (uint16_t)(((attitude.values.yaw * 10) % 36000 + 36000) % 36000);
 }
 
 static void mavlinkSendGpsGlobalPosition(void)
 {
     uint16_t msgLength;
 
-    if (!sensors(SENSOR_GPS)) {
+    static uint32_t sentSequence;
+    if (getMessageUpdateInterval(MAVLINK_MSG_ID_GPS_RAW_INT) < 0) {
+        gpsPositionSnapshot = gpsSnapshot;
+        gpsPositionHeading = gpsSnapshotHeading;
+        gpsPositionTime = gpsSnapshotTime;
+        gpsPositionSequence = gpsSnapshotSequence;
+    }
+    if (!sensors(SENSOR_GPS) || !gpsPositionSequence || sentSequence == gpsPositionSequence) {
         return;
     }
 
+    if (!gpsPositionSnapshot.telemetryVelocityValid) {
+        return;
+    }
+    sentSequence = gpsPositionSequence;
+
     // Global position
     mavlink_msg_global_position_int_pack(MAVLINK_SYSTEM_ID, MAVLINK_COMPONENT_ID, &mavMsg,
-        // time_usec Timestamp (microseconds since UNIX epoch or microseconds since system boot)
-        micros(),
+        // time_boot_ms Timestamp (milliseconds since system boot)
+        (uint32_t)(gpsPositionTime / 1000),
         // lat Latitude in 1E7 degrees
-        gpsSol.llh.lat,
+        gpsPositionSnapshot.llh.lat,
         // lon Longitude in 1E7 degrees
-        gpsSol.llh.lon,
+        gpsPositionSnapshot.llh.lon,
         // alt Altitude in 1E3 meters (millimeters) above MSL
-        gpsSol.llh.altCm * 10,
+        gpsPositionSnapshot.llh.altCm * 10,
         // relative_alt Altitude above ground in meters, expressed as * 1000 (millimeters)
         getEstimatedAltitudeCm() * 10,
         // Ground X Speed (Latitude), expressed as m/s * 100
-        gpsSol.velned.velN,
+        gpsPositionSnapshot.velned.velN,
         // Ground Y Speed (Longitude), expressed as m/s * 100
-        gpsSol.velned.velE,
+        gpsPositionSnapshot.velned.velE,
         // Ground Z Speed (Altitude), expressed as m/s * 100
-        gpsSol.velned.velD,
+        gpsPositionSnapshot.velned.velD,
         // hdg Vehicle heading (yaw angle), 0.0..359.99 degrees in centidegrees. UINT16_MAX = unknown.
-        getHeadingCentidegrees()
+        gpsPositionHeading
     );
     msgLength = mavlink_msg_to_send_buffer(mavBuffer, &mavMsg);
     mavlinkSerialWrite(mavBuffer, msgLength);
@@ -880,6 +979,26 @@ static void mavlinkSendHomePosition(void)
 }
 #endif
 
+#ifdef USE_ACC
+static void mavlinkSendHighresImu(void)
+{
+    static uint32_t sentSequence;
+    static uint32_t sentGyroSequence;
+    if (!sensors(SENSOR_ACC) || !imuSnapshot.sequence || sentSequence == imuSnapshot.sequence) {
+        return;
+    }
+    sentSequence = imuSnapshot.sequence;
+    const uint16_t updated = 0x0007 | (sentGyroSequence != imuSnapshot.gyroSequence ? 0x0038 : 0);
+    sentGyroSequence = imuSnapshot.gyroSequence;
+    mavlink_msg_highres_imu_pack(MAVLINK_SYSTEM_ID, MAVLINK_COMPONENT_ID, &mavMsg,
+        imuSnapshot.time,
+        imuSnapshot.acceleration[X], -imuSnapshot.acceleration[Y], -imuSnapshot.acceleration[Z],
+        imuSnapshot.rate[X], -imuSnapshot.rate[Y], -imuSnapshot.rate[Z],
+        0, 0, 0, 0, 0, 0, 0, updated, 0);
+    mavlinkSendMessage(&mavMsg);
+}
+#endif
+
 static void mavlinkSendAttitude(void)
 {
     uint16_t msgLength;
@@ -893,11 +1012,11 @@ static void mavlinkSendAttitude(void)
         // yaw Yaw angle (rad)
         DECIDEGREES_TO_RADIANS(attitude.values.yaw),
         // rollspeed Roll angular speed (rad/s)
-        0,
+        DEGREES_TO_RADIANS(gyro.gyroADCf[X]),
         // pitchspeed Pitch angular speed (rad/s)
-        0,
+        DEGREES_TO_RADIANS(-gyro.gyroADCf[Y]),
         // yawspeed Yaw angular speed (rad/s)
-        0);
+        DEGREES_TO_RADIANS(-gyro.gyroADCf[Z]));
     msgLength = mavlink_msg_to_send_buffer(mavBuffer, &mavMsg);
     mavlinkSerialWrite(mavBuffer, msgLength);
 
@@ -1103,6 +1222,15 @@ static void mavlinkSendBatteryStatus(void)
 * The MAV_CMD_SET_MESSAGE_INTERVAL handler will set the update time for any message individually by message id from the GCS command
 */
 static mavlinkTelemetryOutputMessage_t mavTelemetryOutputMessages[] = {
+#ifdef USE_ACC
+    {
+        .id = MAVLINK_MSG_ID_HIGHRES_IMU,
+        .stream = MAV_DATA_STREAM_RAW_SENSORS,
+        .updateInterval = UINT32_MAX,
+        .updateTime = 0,
+        .sendMessageFunc = mavlinkSendHighresImu,
+    },
+#endif
     {
         .id = MAVLINK_MSG_ID_SYS_STATUS,
         .stream = MAV_DATA_STREAM_EXTENDED_STATUS,
@@ -1183,6 +1311,9 @@ static uint32_t getConfigStreamUpdateInterval(uint8_t stream) {
     uint32_t updateInterval;
 
     switch (stream) {
+    case MAV_DATA_STREAM_RAW_SENSORS:
+        rate = telemetryConfig()->mavlink_imu_rate;
+        break;
     case MAV_DATA_STREAM_EXTENDED_STATUS:
         rate = telemetryConfig()->mavlink_extended_status_rate;
         break;
@@ -1239,7 +1370,7 @@ static int32_t getMessageUpdateInterval(uint32_t messageId)
             if (updateIntervalMs == UINT32_MAX) {
                 updateIntervalUs = -1;
             } else {
-                updateIntervalUs = updateIntervalMs * 1000 <= INT32_MAX ? (int32_t)(updateIntervalMs * 1000) : INT32_MAX;
+                updateIntervalUs = updateIntervalMs <= INT32_MAX / 1000 ? (int32_t)(updateIntervalMs * 1000) : INT32_MAX;
             }
             break;
         }
@@ -1261,6 +1392,7 @@ static bool setMessageUpdateInterval(uint32_t messageId, uint32_t intervalMs)
                 intervalMs = MIN_MAVLINK_TELEMETRY_UPDATE_INTERVAL_MS;
             }
             mavTelemetryOutputMessages[i].updateInterval = intervalMs;
+            mavTelemetryOutputMessages[i].updateTime = millis() + (intervalMs == UINT32_MAX ? 0 : intervalMs);
             return true;
         }
     }
@@ -1272,9 +1404,13 @@ static void processMAVLinkTelemetry(void)
     timeMs_t currentTimeMs = millis();
     for (uint16_t i = 0; i < TELEMETRIES_OUTPUT_MESSAGES_COUNT; i++) {
         if (mavTelemetryOutputMessages[i].updateInterval != UINT32_MAX && mavTelemetryOutputMessages[i].sendMessageFunc != NULL) {
-            if (currentTimeMs >= mavTelemetryOutputMessages[i].updateTime) {
+            if ((int32_t)(currentTimeMs - mavTelemetryOutputMessages[i].updateTime) >= 0) {
                 mavTelemetryOutputMessages[i].sendMessageFunc();
-                mavTelemetryOutputMessages[i].updateTime = currentTimeMs + mavTelemetryOutputMessages[i].updateInterval;
+                // Preserve phase across scheduler jitter, skipping missed slots
+                // instead of accumulating delay or bursting old samples.
+                const uint32_t interval = mavTelemetryOutputMessages[i].updateInterval;
+                const uint32_t elapsed = currentTimeMs - mavTelemetryOutputMessages[i].updateTime;
+                mavTelemetryOutputMessages[i].updateTime += (elapsed / interval + 1) * interval;
             }
         }
     }
@@ -1308,6 +1444,7 @@ void checkMAVLinkTelemetryState(void)
 
 void handleMAVLinkTelemetry(void)
 {
+    mavlinkBootTimeUs();
     if (!mavlinkTelemetryEnabled || !mavlinkPort) {
         return;
     }
@@ -1325,18 +1462,11 @@ void handleMAVLinkTelemetry(void)
     mavMissionUpdate(millis());
 #endif
 
-    bool shouldSendTelemetry = false;
-    uint32_t now = micros();
-    if (isValidMavlinkTxBuffer()) {
-        shouldSendTelemetry = shouldSendMavlinkTelemetry();
-    } else if ((now - lastMavlinkMessageTime) >= TELEMETRY_MAVLINK_DELAY) {
-        shouldSendTelemetry = true;
-    }
-
-    if (shouldSendTelemetry) {
+    // Each message has its own deadline; a second rate limiter here would
+    // accumulate scheduler jitter and reduce the requested output rates.
+    if (!isValidMavlinkTxBuffer() || shouldSendMavlinkTelemetry()) {
         processMAVLinkTelemetry();
         mavlinkProcessArmingStatusText();
-        lastMavlinkMessageTime = now;
     }
 }
 

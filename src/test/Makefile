@@ -229,6 +229,8 @@ flight_mixer_unittest :=  \
 		$(USER_DIR)/common/maths.c
 
 
+mavlink_time_unittest_SRC := $(USER_DIR)/telemetry/mavlink_time.c
+
 gps_conversion_unittest_SRC := \
 		$(USER_DIR)/common/gps_conversion.c
 

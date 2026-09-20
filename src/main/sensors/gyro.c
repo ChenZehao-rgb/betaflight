@@ -493,6 +493,14 @@ FAST_CODE void gyroUpdate(void)
 #undef GYRO_FILTER_DEBUG_SET
 #undef GYRO_FILTER_AXIS_DEBUG_SET
 
+#ifdef USE_TELEMETRY_MAVLINK
+static uint32_t gyroFilteredSequence;
+uint32_t gyroGetFilteredSequence(void)
+{
+    return gyroFilteredSequence;
+}
+#endif
+
 FAST_CODE void gyroFiltering(timeUs_t currentTimeUs)
 {
     if (gyro.gyroDebugMode == DEBUG_NONE) {
@@ -500,6 +508,9 @@ FAST_CODE void gyroFiltering(timeUs_t currentTimeUs)
     } else {
         filterGyroDebug();
     }
+#ifdef USE_TELEMETRY_MAVLINK
+    ++gyroFilteredSequence;
+#endif
 
 #ifdef USE_DYN_NOTCH_FILTER
     if (isDynNotchActive()) {

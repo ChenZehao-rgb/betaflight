@@ -47,6 +47,9 @@
 #endif
 
 #include "io/gps.h"
+#ifdef USE_TELEMETRY_MAVLINK
+#include "telemetry/mavlink.h"
+#endif
 #include "io/gps_virtual.h"
 
 #if ENABLE_DRONECAN
@@ -2507,6 +2510,14 @@ static bool UBLOX_parse_gps(void)
         *dashboardGpsPacketLogCurrentChar = DASHBOARD_LOG_UBLOX_SOL;
 #endif
         ubxHaveNewValidFix = (ubxRcvMsgPayload.ubxNavPvt.flags & NAV_STATUS_FIX_VALID) && (ubxRcvMsgPayload.ubxNavPvt.fixType == FIX_3D);
+        gpsSol.altitudeEllipsoidMm = ubxRcvMsgPayload.ubxNavPvt.height;
+        gpsSol.telemetryEllipsoidValid = ubxHaveNewValidFix;
+        gpsSol.telemetryVelocityValid = ubxHaveNewValidFix;
+        gpsSol.telemetryAccuracyValid = ubxHaveNewValidFix;
+        const uint8_t carrier = (ubxRcvMsgPayload.ubxNavPvt.flags >> 6) & 3;
+        gpsSol.telemetryFixType = !ubxHaveNewValidFix ? 1 :
+            carrier == 2 ? 6 : carrier == 1 ? 5 :
+            (ubxRcvMsgPayload.ubxNavPvt.flags & 2) ? 4 : 3;
         gpsSol.time = ubxRcvMsgPayload.ubxNavPvt.time;
         calculateNavInterval();
         gpsSol.llh.lon = ubxRcvMsgPayload.ubxNavPvt.lon;
@@ -2584,6 +2595,9 @@ static bool UBLOX_parse_gps(void)
 #ifdef USE_DASHBOARD
         *dashboardGpsPacketLogCurrentChar = DASHBOARD_LOG_UBLOX_POSLLH;
 #endif
+        gpsSol.telemetryFixType = ubxHaveNewValidFix ? 3 : 1;
+        gpsSol.telemetryEllipsoidValid = false;
+        gpsSol.telemetryAccuracyValid = false;
         //i2c_dataset.time                = _buffer.ubxNavPosllh.time;
         gpsSol.llh.lon = ubxRcvMsgPayload.ubxNavPosllh.longitude;
         gpsSol.llh.lat = ubxRcvMsgPayload.ubxNavPosllh.latitude;
@@ -2633,6 +2647,7 @@ static bool UBLOX_parse_gps(void)
 #ifdef USE_DASHBOARD
         *dashboardGpsPacketLogCurrentChar = DASHBOARD_LOG_UBLOX_VELNED;
 #endif
+        gpsSol.telemetryVelocityValid = ubxHaveNewValidFix;
         gpsSol.speed3d = ubxRcvMsgPayload.ubxNavVelned.speed_3d;       // cm/s
         gpsSol.groundSpeed = ubxRcvMsgPayload.ubxNavVelned.speed_2d;    // cm/s
         gpsSol.groundCourse = (uint16_t) (ubxRcvMsgPayload.ubxNavVelned.heading_2d / 10000);     // Heading 2D deg * 100000 rescaled to deg * 10
@@ -3012,6 +3027,9 @@ void GPS_distance2d(const gpsLocation_t *from, const gpsLocation_t *to, vector2_
 
 void onGpsNewData(void)
 {
+#ifdef USE_TELEMETRY_MAVLINK
+    mavlinkCaptureGps();
+#endif
     if (!STATE(GPS_FIX)) {
         // if we don't have a 3D fix don't give data to GPS rescue
         return;

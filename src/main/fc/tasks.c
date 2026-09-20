@@ -617,6 +617,11 @@ void tasksInit(void)
 #ifdef USE_TELEMETRY
     if (featureIsEnabled(FEATURE_TELEMETRY)) {
         setTaskEnabled(TASK_TELEMETRY, true);
+#ifdef USE_TELEMETRY_MAVLINK
+        if (findSerialPortConfig(FUNCTION_TELEMETRY_MAVLINK) || rxRuntimeState.serialrxProvider == SERIALRX_MAVLINK) {
+            rescheduleTask(TASK_TELEMETRY, TASK_PERIOD_HZ(1000));
+        } else
+#endif
         if (rxRuntimeState.serialrxProvider == SERIALRX_JETIEXBUS) {
             // Reschedule telemetry to 500hz for Jeti Exbus
             rescheduleTask(TASK_TELEMETRY, TASK_PERIOD_HZ(500));

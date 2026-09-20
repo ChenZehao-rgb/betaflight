@@ -211,3 +211,7 @@ bool gyroHasDownsampledData(void);
 float gyroGetDownsampled(int axis);
 bool gyroStartDownsampledCycle(void);
 #endif
+
+#ifdef USE_TELEMETRY_MAVLINK
+uint32_t gyroGetFilteredSequence(void);
+#endif

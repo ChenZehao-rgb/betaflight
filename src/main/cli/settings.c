@@ -1434,10 +1434,11 @@ const clivalue_t valueTable[] = {
     { "mavlink_mah_as_heading_divisor", VAR_UINT16 | MASTER_VALUE, .config.minmaxUnsigned = { 0, 30000 }, PG_TELEMETRY_CONFIG, offsetof(telemetryConfig_t, mavlink_mah_as_heading_divisor) },
     // mavlink telemetry flow control to prevent TX buffers overflow
     { "mavlink_min_txbuff", VAR_UINT8 | MASTER_VALUE, .config.minmaxUnsigned = { 1, 100 }, PG_TELEMETRY_CONFIG, offsetof(telemetryConfig_t, mavlink_min_txbuff) },
+    { "mavlink_imu_rate", VAR_UINT16 | MASTER_VALUE, .config.minmaxUnsigned = { 0, 500 }, PG_TELEMETRY_CONFIG, offsetof(telemetryConfig_t, mavlink_imu_rate) },
     { "mavlink_ext_status_rate", VAR_UINT8 | MASTER_VALUE, .config.minmaxUnsigned = { 0, 50 }, PG_TELEMETRY_CONFIG, offsetof(telemetryConfig_t, mavlink_extended_status_rate) },
     { "mavlink_rc_chan_rate", VAR_UINT8 | MASTER_VALUE, .config.minmaxUnsigned = { 0, 50 }, PG_TELEMETRY_CONFIG, offsetof(telemetryConfig_t, mavlink_rc_channels_rate) },
     { "mavlink_pos_rate", VAR_UINT8 | MASTER_VALUE, .config.minmaxUnsigned = { 0, 50 }, PG_TELEMETRY_CONFIG, offsetof(telemetryConfig_t, mavlink_position_rate) },
-    { "mavlink_extra1_rate", VAR_UINT8 | MASTER_VALUE, .config.minmaxUnsigned = { 0, 50 }, PG_TELEMETRY_CONFIG, offsetof(telemetryConfig_t, mavlink_extra1_rate) },
+    { "mavlink_extra1_rate", VAR_UINT8 | MASTER_VALUE, .config.minmaxUnsigned = { 0, 100 }, PG_TELEMETRY_CONFIG, offsetof(telemetryConfig_t, mavlink_extra1_rate) },
     { "mavlink_extra2_rate", VAR_UINT8 | MASTER_VALUE, .config.minmaxUnsigned = { 0, 50 }, PG_TELEMETRY_CONFIG, offsetof(telemetryConfig_t, mavlink_extra2_rate) },
     { "mavlink_extra3_rate", VAR_UINT8 | MASTER_VALUE, .config.minmaxUnsigned = { 0, 50 }, PG_TELEMETRY_CONFIG, offsetof(telemetryConfig_t, mavlink_extra3_rate) },
 #endif

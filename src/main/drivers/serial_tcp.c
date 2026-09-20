@@ -67,6 +67,12 @@ static void onClose(dyad_Event *e)
     }
 }
 
+static void onTick(dyad_Event *e)
+{
+    // dyad is not thread-safe: drain TX only from its event thread.
+    tcpDataOut((tcpPort_t *)e->udata);
+}
+
 static void onAccept(dyad_Event *e)
 {
     tcpPort_t* s = (tcpPort_t*)(e->udata);
@@ -82,6 +88,7 @@ static void onAccept(dyad_Event *e)
     s->conn = e->remote;
     dyad_setNoDelay(e->remote, 1);
     dyad_setTimeout(e->remote, 120);
+    dyad_addListener(e->remote, DYAD_EVENT_TICK, onTick, e->udata);
     dyad_addListener(e->remote, DYAD_EVENT_DATA, onData, e->udata);
     dyad_addListener(e->remote, DYAD_EVENT_CLOSE, onClose, e->udata);
 }
@@ -229,7 +236,6 @@ static void tcpWrite(serialPort_t *instance, uint8_t ch)
     }
     pthread_mutex_unlock(&s->txLock);
 
-    tcpDataOut(s);
 }
 
 void tcpDataOut(tcpPort_t *instance)

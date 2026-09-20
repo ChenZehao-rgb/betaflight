@@ -566,8 +566,8 @@ static void* tcpThread(void* data)
     UNUSED(data);
 
     dyad_init();
-    dyad_setTickInterval(0.2f);
-    dyad_setUpdateTimeout(0.01f);
+    dyad_setTickInterval(0.001f);
+    dyad_setUpdateTimeout(0.001f);
 
     while (workerRunning) {
         dyad_update();

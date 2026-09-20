@@ -22,7 +22,7 @@
 
 #include "common/time.h"
 
-#define MIN_MAVLINK_TELEMETRY_UPDATE_INTERVAL_MS 20
+#define MIN_MAVLINK_TELEMETRY_UPDATE_INTERVAL_MS 2
 
 void initMAVLinkTelemetry(void);
 void handleMAVLinkTelemetry(void);
@@ -48,3 +48,8 @@ typedef struct mavlinkTelemetryOutputMessage_s {
     timeMs_t updateTime;
     void (*const sendMessageFunc)(void);
 } mavlinkTelemetryOutputMessage_t;
+
+// Called only from cooperative scheduler tasks, never from an ISR.
+uint64_t mavlinkBootTimeUs(void);
+void mavlinkCaptureImu(void);
+void mavlinkCaptureGps(void);
