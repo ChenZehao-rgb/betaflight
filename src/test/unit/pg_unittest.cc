@@ -22,17 +22,20 @@
 #include <limits.h>
 
 extern "C" {
-    #include <platform.h>
-    #include "build/debug.h"
-    #include "pg/pg.h"
-    #include "pg/pg_ids.h"
-    #include "pg/motor.h"
+#include <platform.h>
 
-    #include "flight/mixer.h"
+#include "build/debug.h"
+#include "flight/mixer.h"
+#include "pg/motor.h"
+#include "pg/pg.h"
+#include "pg/pg_ids.h"
+#include "pg/rx.h"
 
 //PG_DECLARE(motorConfig_t, motorConfig);
 
 PG_REGISTER_WITH_RESET_TEMPLATE(motorConfig_t, motorConfig, PG_MOTOR_CONFIG, 1);
+PG_REGISTER_WITH_RESET_TEMPLATE(rxConfig_t, rxConfig, PG_RX_CONFIG, 4);
+PG_RESET_TEMPLATE(rxConfig_t, rxConfig, .msp_override_timeout_ms = 300);
 
 PG_RESET_TEMPLATE(motorConfig_t, motorConfig,
     .dev = {
@@ -98,4 +101,22 @@ TEST(ParameterGroupsfTest, Test_pgFind)
 // STUBS
 
 extern "C" {
+}
+
+TEST(ParameterGroupsfTest, ReceiverVersionFourExtensionPreservesLegacyBytes) {
+	static_assert(offsetof(rxConfig_t, msp_override_timeout_ms) == 52, "preserve RX v4 prefix including padding");
+	static_assert(sizeof(rxConfig_t) == 56, "RX extension layout");
+	const pgRegistry_t* registry = pgFind(PG_RX_CONFIG);
+	uint8_t legacy[52];
+	memset(legacy, 0xa5, sizeof(legacy));
+	EXPECT_TRUE(pgLoad(registry, legacy, sizeof(legacy), 4));
+	EXPECT_EQ(0, memcmp(rxConfig(), legacy, sizeof(legacy)));
+	EXPECT_EQ(300u, rxConfig()->msp_override_timeout_ms);
+	rxConfigMutable()->msp_override_timeout_ms = 50;
+	rxConfig_t stored;
+	EXPECT_EQ(sizeof(stored), static_cast<size_t>(pgStore(registry, &stored, sizeof(stored))));
+	pgReset(registry);
+	EXPECT_TRUE(pgLoad(registry, &stored, sizeof(stored), 4));
+	EXPECT_EQ(50u, rxConfig()->msp_override_timeout_ms);
+	EXPECT_EQ(0, memcmp(rxConfig(), legacy, sizeof(legacy)));
 }

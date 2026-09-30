@@ -95,3 +95,5 @@ bool imuQuaternionHeadfreeOffsetSet(void);
 void imuQuaternionHeadfreeTransformVectorEarthToBody(vector3_t *v);
 bool isUpright(void);
 bool imuIsHeadingValid(void);
+// Requires a recent yaw update using a trusted, calibrated, fresh magnetometer.
+bool imuIsMagHeadingValid(void);

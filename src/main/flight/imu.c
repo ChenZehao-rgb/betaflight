@@ -88,6 +88,11 @@ static bool imuUpdated = false;
 
 bool canUseGPSHeading;
 
+#ifdef USE_MAG
+static bool magHeadingUpdated = false;
+static timeUs_t lastMagHeadingUpdateUs;
+#endif
+
 static float throttleAngleScale;
 static int throttleAngleValue;
 static float smallAngleCosZ = 0;
@@ -205,12 +210,25 @@ void imuConfigure(uint16_t throttle_correction_angle, uint8_t throttle_correctio
 void imuInit(void)
 {
     canUseGPSHeading = false;
+#ifdef USE_MAG
+    magHeadingUpdated = false;
+#endif
     imuComputeRotationMatrix();
 
 #if ENABLE_SIMULATOR_MULTITHREAD
     if (pthread_mutex_init(&imuUpdateLock, NULL) != 0) {
         printf("Create imuUpdateLock error!\n");
     }
+#endif
+}
+
+bool imuIsMagHeadingValid(void)
+{
+#ifdef USE_MAG
+    const timeDelta_t age = cmpTimeUs(micros(), lastMagHeadingUpdateUs);
+    return magHeadingUpdated && age >= 0 && age <= 100000 && compassEnabledAndCalibrated();
+#else
+    return false;
 #endif
 }
 
@@ -711,6 +729,8 @@ static void imuCalculateEstimatedAttitude(timeUs_t currentTimeUs)
     if (compassEnabledAndCalibrated()) {
         useMag = true;
         magErr = imuCalcMagErr();
+        magHeadingUpdated = isfinite(magErr);
+        lastMagHeadingUpdateUs = currentTimeUs;
     }
 #endif
 

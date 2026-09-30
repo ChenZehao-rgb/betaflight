@@ -261,7 +261,8 @@ protected:
     void SetUp() override {
         vector3Zero(&gyro);
         useAcc = false;
-        vector3Zero(&acc);
+	useMag = false;
+	vector3Zero(&acc);
         cogGain = 0.0;   // no cog
         cogDeg  = 0.0;
         dcmKp = .25;     // default dcm_kp
@@ -384,6 +385,33 @@ INSTANTIATE_TEST_SUITE_P(
       0, 45, -45, 90, 180, 270, 720+45
       ));
 
+static uint32_t simulated_time_us = 0;
+static bool compass_usable = true;
+
+TEST(FlightImuTest, MagneticHeadingRequiresRecentUsableCorrection) {
+	imuInit();
+	imuConfigure(0, 0);
+	EXPECT_FALSE(imuIsMagHeadingValid());
+	acc.isAccelUpdatedAtLeastOnce = true;
+	acc.accADC = vector3_t{{0.0f, 0.0f, 1.0f}};
+	mag.magADC = vector3_t{{1.0f, 0.0f, 0.5f}};
+	q = quaternion_t{1.0f, 0.0f, 0.0f, 0.0f};
+	imuComputeRotationMatrix();
+	simulated_time_us = 1000;
+	imuUpdateAttitude(simulated_time_us);
+	EXPECT_TRUE(imuIsMagHeadingValid());
+	compass_usable = false;  // Trust/calibration/readout failure from the compass subsystem.
+	EXPECT_FALSE(imuIsMagHeadingValid());
+	compass_usable = true;
+	simulated_time_us += 100001;
+	EXPECT_FALSE(imuIsMagHeadingValid());
+	imuUpdateAttitude(simulated_time_us);
+	EXPECT_TRUE(imuIsMagHeadingValid());
+	imuInit();
+	EXPECT_FALSE(imuIsMagHeadingValid());
+	simulated_time_us = 0;
+}
+
 // STUBS
 
 extern "C" {
@@ -419,9 +447,9 @@ extern "C" {
     };
 
     uint32_t millis(void) { return 0; }
-    uint32_t micros(void) { return 0; }
+    uint32_t micros(void) { return simulated_time_us; }
 
-    bool compassEnabledAndCalibrated(void) { return true; }
+    bool compassEnabledAndCalibrated(void) { return compass_usable; }
     bool baroIsCalibrated(void) { return true; }
     void performBaroCalibrationCycle(void) {}
     float baroCalculateAltitude(void) { return 0; }

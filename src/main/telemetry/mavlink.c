@@ -890,6 +890,9 @@ static void mavlinkSendGpsRaw(void)
 
 static uint16_t getHeadingCentidegrees(void)
 {
+    if (!imuIsMagHeadingValid()) {
+        return UINT16_MAX;
+    }
     return (uint16_t)(((attitude.values.yaw * 10) % 36000 + 36000) % 36000);
 }
 
@@ -932,7 +935,7 @@ static void mavlinkSendGpsGlobalPosition(void)
         // Ground Z Speed (Altitude), expressed as m/s * 100
         gpsPositionSnapshot.velned.velD,
         // hdg Vehicle heading (yaw angle), 0.0..359.99 degrees in centidegrees. UINT16_MAX = unknown.
-        gpsPositionHeading
+        imuIsMagHeadingValid() ? gpsPositionHeading : UINT16_MAX
     );
     msgLength = mavlink_msg_to_send_buffer(mavBuffer, &mavMsg);
     mavlinkSerialWrite(mavBuffer, msgLength);
