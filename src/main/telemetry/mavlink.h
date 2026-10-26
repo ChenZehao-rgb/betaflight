@@ -53,3 +53,4 @@ typedef struct mavlinkTelemetryOutputMessage_s {
 uint64_t mavlinkBootTimeUs(void);
 void mavlinkCaptureImu(void);
 void mavlinkCaptureGps(void);
+void mavlinkCaptureBaro(void);

@@ -58,6 +58,10 @@
 
 #include "scheduler/scheduler.h"
 
+#ifdef USE_TELEMETRY_MAVLINK
+#include "telemetry/mavlink.h"
+#endif
+
 #include "barometer.h"
 
 baro_t baro;                        // barometer access functions
@@ -502,6 +506,10 @@ uint32_t baroUpdate(timeUs_t currentTimeUs)
 
             // update baro data
             baro.dev.calculate(&baro.pressure, &baro.temperature);
+#ifdef USE_TELEMETRY_MAVLINK
+            // Snapshot compensated pressure before altitude conversion or ground zeroing.
+            mavlinkCaptureBaro();
+#endif
 
             // If baro.pressure is invalid then skip altitude counting / call of calibration cycle
             if (baro.pressure > 0) {

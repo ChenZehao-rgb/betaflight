@@ -25,13 +25,18 @@ AUTO 保留原先的 57600 默认值，不足以承载上述数据流。
 | 消息 | 内容 | 默认目标频率 | 配置 |
 | --- | --- | --- | --- |
 | HIGHRES_IMU (105) | 三轴加速度 m/s²、三轴角速度 rad/s | 250 Hz | `mavlink_imu_rate`，0–500 |
+| SCALED_PRESSURE (29) | 未融合绝对气压 hPa、温度 0.01 °C | 40 Hz，受气压新样本限制 | 独立 `MAV_CMD_SET_MESSAGE_INTERVAL`，需 `USE_BARO` |
 | GPS_RAW_INT (24) | 经纬度、高度、地速、航向及定位质量 | 10 Hz | `mavlink_pos_rate`，0–50 |
 | GLOBAL_POSITION_INT (33) | 经纬度、高度、北/东/地向速度 cm/s | 10 Hz | 同上 |
 | ATTITUDE (30) | 欧拉角 rad 和三轴角速度 rad/s | 100 Hz | `mavlink_extra1_rate`，0–100 |
 
 设 `mavlink_extra1_rate = 0` 可关闭姿态；设 `mavlink_imu_rate = 500` 可提高 IMU 输出目标频率。
 IMU 数值经过飞控校准、安装方向旋转和滤波，使用前/右/下机体系，静止水平时 z 加速度约
--9.80665 m/s²，未扣除重力。未提供磁场、气压、温度，`fields_updated` 仅置六轴位。
+-9.80665 m/s²，未扣除重力。HIGHRES_IMU 未提供磁场、气压、温度，`fields_updated` 仅置六轴位。
+气压由独立 SCALED_PRESSURE 消息提供，不受 `mavlink_imu_rate`（包括设为 0）影响。
+MS5611 当前驱动名义采样率约 40 Hz；消息时间戳是压力读取、补偿完成时的飞控时间，
+不是发送时间或 ADC 精确转换时刻。只发送新样本，超过 250 ms 的快照不发送。
+字段映射、请求方式和 ROS 接收/融合步骤见 [气压回传与 ROS 接入](mavlink-baro-ros.md)。
 时间戳现在来自飞控传感器成功更新后的六轴快照，不是发送时间，也不是硬件同步采样时间。
 IMU、GPS 和 TIMESYNC 使用扩展后的 64 位启动微秒时间，处理底层 `micros()` 回绕。
 GPS 毫秒字段仍按 MAVLink 标准使用 32 位值，接收端需结合同步时钟扩展。
@@ -54,7 +59,8 @@ POSITION 组还包含已建立的 home/origin 消息。
 共享接收机串口仍遵守现有无线链路流控，高频需求应使用独立 UART。
 
 支持 `MAV_CMD_SET_MESSAGE_INTERVAL`，param1 为消息 ID，param2 为微秒间隔：
-2000 = 500 Hz，4000 = 250 Hz，10000 = 100 Hz，-1 = 关闭，0 = 恢复 CLI 默认。
+2000 = 500 Hz，4000 = 250 Hz，10000 = 100 Hz，-1 = 关闭，0 = 恢复消息默认。
+SCALED_PRESSURE 的默认间隔独立为 25000 µs（40 Hz），其它消息恢复 CLI 默认。
 运行时请求不写入持久配置。
 
 本次遥测配置结构版本由 6 升至 7，升级会重置 telemetry 参数组。
@@ -65,10 +71,14 @@ POSITION 组还包含已建立的 home/origin 消息。
 ```sh
 CCACHE_DISABLE=1 LC_ALL=C make TARGET=SITL EXTRA_FLAGS='-DUSE_TELEMETRY -DUSE_TELEMETRY_MAVLINK' -j4
 python3 src/test/sitl/mavlink_telemetry_harness.py obj/main/betaflight_SITL.elf
+python3 src/test/sitl/mavlink_baro_harness.py obj/main/betaflight_SITL.elf
 ```
 
 测试依赖 pymavlink，使用本机 TCP 5761/5762 和 UDP 仿真端口，检查解码后的 IMU 单位、
 GPS 毫秒时间戳、三种数据流频率，以及运行时升频、关闭和恢复。
+独立气压测试还检查压力/温度单位、气压调频与关闭/恢复、IMU 关闭时气压继续、
+无效压力抑制和新样本去重。两项测试使用相同仿真端口，应串行运行。
+SITL 虚拟气压计的采样周期约 12 ms；其高请求率测试不代表物理 MS5611 的采样率。
 SITL 按飞控时间统计频率，不能验证物理 UART 吞吐率或实际硬件 CPU 负载。
 实际飞控还应在拆除螺旋桨的台架环境下检查 `tasks` 和接收端频率。
 
