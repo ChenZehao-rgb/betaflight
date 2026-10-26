@@ -565,7 +565,20 @@ poshold_unittest_SRC := \
 		$(USER_DIR)/common/filter.c \
 		$(USER_DIR)/pg/rx.c
 
+mavlink_odometry_unittest_SRC := \
+        $(USER_DIR)/telemetry/mavlink_odometry.c \
+        $(USER_DIR)/telemetry/mavlink.c \
+        $(USER_DIR)/telemetry/mavlink_time.c
+mavlink_odometry_unittest_DEFINES := USE_TELEMETRY_MAVLINK=
+# Drop uncalled hardware/command handlers, testing real scheduler, codec and TX.
+mavlink_odometry_unittest_CFLAGS := -Ofast -ffunction-sections -fdata-sections
+mavlink_odometry_unittest_LDFLAGS := -Wl,--gc-sections
+
+mavlink_time_unittest_SRC := $(USER_DIR)/telemetry/mavlink_time.c
+
 position_estimator_unittest_SRC := \
+		$(USER_DIR)/telemetry/mavlink_odometry.c \
+		$(USER_DIR)/telemetry/mavlink_time.c \
 		$(USER_DIR)/flight/position_estimator.c \
 		$(USER_DIR)/flight/position_filter.c \
 		$(USER_DIR)/common/maths.c \
@@ -987,14 +1000,14 @@ endif
 $(OBJECT_DIR)/$1/%.c.o: $(USER_DIR)/%.c
 	@echo "compiling $$<" "$(STDOUT)"
 	$(V1) mkdir -p $$(dir $$@)
-	$(V1) $(CC) $(C_FLAGS) $$(call test_cflags,$$($1_INCLUDE_DIRS)) \
+	$(V1) $(CC) $(C_FLAGS) $$($1_CFLAGS) $$(call test_cflags,$$($1_INCLUDE_DIRS)) \
                 $$(foreach def,$$($1_DEFINES),-D $$(def)) \
                 -c $$< -o $$@
 
 $(OBJECT_DIR)/$1/%.c.o: $(TEST_DIR)/%.c
 	@echo "compiling test c file: $$<" "$(STDOUT)"
 	$(V1) mkdir -p $$(dir $$@)
-	$(V1) $(CC) $(C_FLAGS) $$(call test_cflags,$$($1_INCLUDE_DIRS)) \
+	$(V1) $(CC) $(C_FLAGS) $$($1_CFLAGS) $$(call test_cflags,$$($1_INCLUDE_DIRS)) \
                 $$(foreach def,$$($1_DEFINES),-D $$(def)) \
                 -c $$< -o $$@
 
@@ -1003,7 +1016,7 @@ ifneq ($1,$(basename $1))
 $(OBJECT_DIR)/$1/%.c.o: $(TARGET_DIR)/$(TARGET)/%.c
 	@echo "compiling target c file: $$<" "$(STDOUT)"
 	$(V1) mkdir -p $$(dir $$@)
-	$(V1) $(CC) $(C_FLAGS) $$(call test_cflags,$$($1_INCLUDE_DIRS)) \
+	$(V1) $(CC) $(C_FLAGS) $$($1_CFLAGS) $$(call test_cflags,$$($1_INCLUDE_DIRS)) \
                 $$(foreach def,$$($1_DEFINES),-D $$(def)) \
                 -c $$< -o $$@
 endif
@@ -1021,7 +1034,7 @@ $(OBJECT_DIR)/$1/$(basename $1): $$($1_OBJS) \
 
 	@echo "linking $$@" "$(STDOUT)"
 	$(V1) mkdir -p $(dir $$@)
-	$(V1) $(CXX) $(CXX_FLAGS) $(LDFLAGS) $$^ -o $$@
+	$(V1) $(CXX) $(CXX_FLAGS) $(LDFLAGS) $$($1_LDFLAGS) $$^ -o $$@
 
 test_$1: $(OBJECT_DIR)/$1/$(basename $1)
 	$(V1) $$< $$(EXEC_OPTS) "$(STDOUT)" && echo "running $$@: PASS"

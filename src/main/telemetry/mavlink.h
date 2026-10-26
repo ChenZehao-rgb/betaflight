@@ -20,9 +20,10 @@
 
 #pragma once
 
+#include <stdbool.h>
 #include "common/time.h"
 
-#define MIN_MAVLINK_TELEMETRY_UPDATE_INTERVAL_MS 20
+#define MIN_MAVLINK_TELEMETRY_UPDATE_INTERVAL_MS 10
 
 void initMAVLinkTelemetry(void);
 void handleMAVLinkTelemetry(void);
@@ -46,5 +47,14 @@ typedef struct mavlinkTelemetryOutputMessage_s {
     const uint8_t stream;
     timeMs_t updateInterval;
     timeMs_t updateTime;
-    void (*const sendMessageFunc)(void);
+    bool (*const sendMessageFunc)(void); // false: no new state yet; keep the deadline pending
 } mavlinkTelemetryOutputMessage_t;
+
+// Inspect with debugger; counters include nonblocking whole-frame TX drops.
+typedef struct mavlinkTelemetryStats_s {
+    uint32_t sentFrames, droppedFrames;
+    uint32_t odometryFrames, healthFrames;
+    uint32_t noNewState, staleStates;
+    uint32_t lastStateLatencyUs, maxStateLatencyUs;
+} mavlinkTelemetryStats_t;
+const mavlinkTelemetryStats_t *mavlinkGetTelemetryStats(void);

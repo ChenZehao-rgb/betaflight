@@ -42,6 +42,8 @@
 
 #include "sensors/acceleration.h"
 #include "sensors/sensors.h"
+#include "sensors/gyro.h"
+#include "telemetry/mavlink_time.h"
 
 #ifdef USE_BARO
 #include "sensors/barometer.h"
@@ -179,6 +181,72 @@ static positionKalman_t kfNorth;
 static positionKalman_t kfUp;
 
 static positionEstimate3d_t estimate;
+static fcStateSnapshot_t snapshot;
+static uint32_t stateSequence;
+static uint32_t resetCounter;
+static uint64_t stateTimeUs;
+static uint64_t xyObservationTimeUs, zObservationTimeUs;
+static bool xyObservationSeen, zObservationSeen;
+static uint32_t sourceFlags;
+
+static void stateReset(void)
+{
+    ++resetCounter;
+    snapshot.resetCounter = resetCounter;
+    // Never transmit a snapshot from before a coordinate/filter reset.
+    snapshot.present = false;
+}
+
+static uint32_t observationAge(bool seen, uint64_t last)
+{
+    const uint64_t age = stateTimeUs - last;
+    return !seen || age >= UINT32_MAX ? UINT32_MAX : (uint32_t)age;
+}
+
+static void captureState(void)
+{
+    const positionEstimate3d_t *state = positionEstimatorGetEstimate();
+    snapshot.timeUs = stateTimeUs;
+    snapshot.sequence = ++stateSequence;
+    snapshot.resetCounter = resetCounter;
+    const positionKalman_t *filters[] = { &kfEast, &kfNorth, &kfUp };
+    for (unsigned i = 0; i < 3; ++i) {
+        snapshot.position[i] = state->position.v[i] * 0.01f;
+        snapshot.velocity[i] = state->velocity.v[i] * 0.01f;
+        snapshot.positionVariance[i] = kalmanGetPositionVariance(filters[i]) * 0.0001f;
+        snapshot.velocityVariance[i] = kalmanGetVelocityVariance(filters[i]) * 0.0001f;
+        snapshot.bodyRates[i] = gyro.gyroADCf[i];
+    }
+    quaternion_t q;
+    getQuaternion(&q); // Actual attitude, never the headfree/display quaternion.
+    for (unsigned i = 0; i < 4; ++i) {
+        snapshot.quaternion[i] = q.v[i];
+    }
+    snapshot.trustXY = state->trustXY;
+    snapshot.trustZ = state->trustZ;
+    snapshot.xyValid = state->isValidXY;
+    snapshot.zValid = state->isValidZ;
+    snapshot.headingValid = imuIsHeadingValid();
+    snapshot.magHeadingFresh = imuIsMagHeadingValid();
+    snapshot.armed = ARMING_FLAG(ARMED);
+    snapshot.gpsFix = STATE(GPS_FIX);
+#ifdef USE_GPS
+    // The base GPS solution exposes a fix flag, not receiver RTK/2D type.
+    snapshot.gpsFixType = !sensors(SENSOR_GPS) ? 0 : (STATE(GPS_FIX) ? 3 : 1);
+#else
+    snapshot.gpsFixType = 0;
+#endif
+    snapshot.xyObservationAgeUs = observationAge(xyObservationSeen, xyObservationTimeUs);
+    snapshot.zObservationAgeUs = observationAge(zObservationSeen, zObservationTimeUs);
+    snapshot.sourceFlags = sourceFlags;
+    snapshot.present = true;
+}
+
+const fcStateSnapshot_t *positionEstimatorGetSnapshot(void)
+{
+    return &snapshot;
+}
+
 
 static bool xyEnabled = false;
 static float qaccelXY = Q_ACCEL_XY; // value to use for QAccel
@@ -223,6 +291,7 @@ static void initZCalEntries(void)
 
 void positionEstimatorInit(void)
 {
+    stateReset();
 
 #if defined(USE_POSITION_HOLD)
     qaccelXY = Q_ACCEL_XY * ((autopilotConfig()->positionA > 1) ?  (30.0f / autopilotConfig()->positionA ) : 15.0f);
@@ -240,7 +309,9 @@ void positionEstimatorInit(void)
 
     xyEnabled = false;
     lastXYMeasurementUs = 0;
+    xyObservationSeen = false;
     lastZMeasurementUs = 0;
+    zObservationSeen = false;
 
 #ifdef USE_GPS
     gpsStamp = 0;
@@ -264,6 +335,7 @@ void positionEstimatorInit(void)
 void positionEstimatorEnableXY(bool enable)
 {
     if (enable && !xyEnabled) {
+        stateReset();
         kalmanInit(&kfEast, 0.0f, 0.0f, INITIAL_POS_VAR, INITIAL_VEL_VAR, qaccelXY);
         kalmanInit(&kfNorth, 0.0f, 0.0f, INITIAL_POS_VAR, INITIAL_VEL_VAR, qaccelXY);
         estimate.position.v[ENU_E] = 0.0f;
@@ -271,6 +343,7 @@ void positionEstimatorEnableXY(bool enable)
         estimate.velocity.v[ENU_E] = 0.0f;
         estimate.velocity.v[ENU_N] = 0.0f;
         lastXYMeasurementUs = 0;
+        xyObservationSeen = false;
         estimate.isValidXY = false;
 #ifdef USE_GPS
         // Clear before recapture: a stale origin from a prior XY session must
@@ -370,6 +443,7 @@ static void feedGPSMeasurements(timeUs_t nowUs)
     // available (e.g. opticalflow-only arm), grab the origin the first time
     // a valid fix arrives so downstream consumers (flight plan) can proceed.
     if (xyEnabled && !gpsArmLocationSet && gpsXYAllowed) {
+        stateReset(); // Separate late origin capture; immediate capture belongs to XY reset.
         armLocationGps = gpsSol.llh;
         gpsArmLocationSet = true;
     }
@@ -392,6 +466,9 @@ static void feedGPSMeasurements(timeUs_t nowUs)
         kalmanUpdateVelocity(&kfNorth, (float)gpsSol.velned.velN, rVel);
 
         lastXYMeasurementUs = nowUs;
+        xyObservationSeen = true;
+        xyObservationTimeUs = stateTimeUs;
+        sourceFlags |= 1u << 0;
     }
 
     // Z altitude measurement
@@ -410,6 +487,9 @@ static void feedGPSMeasurements(timeUs_t nowUs)
         const float gpsRelativeAltCm = gpsSol.llh.altCm - gpsAltOffsetCm;
         kalmanUpdatePosition(&kfUp, gpsRelativeAltCm, gpsAltR);
         lastZMeasurementUs = nowUs;
+        zObservationSeen = true;
+        zObservationTimeUs = stateTimeUs;
+        sourceFlags |= 1u << 1;
 
         zCal[CAL_Z_GPS].rawReading = gpsSol.llh.altCm;
         zCal[CAL_Z_GPS].active = true;
@@ -447,6 +527,9 @@ static void feedBaroMeasurements(timeUs_t nowUs)
 
     kalmanUpdatePosition(&kfUp, baroAltCm - baroAltOffsetCm, baroR);
     lastZMeasurementUs = nowUs;
+    zObservationSeen = true;
+    zObservationTimeUs = stateTimeUs;
+    sourceFlags |= 1u << 2;
 
     zCal[CAL_Z_BARO].rawReading = baroAltCm;
     zCal[CAL_Z_BARO].active = true;
@@ -483,6 +566,9 @@ static void feedRangefinderMeasurements(timeUs_t nowUs)
 
     kalmanUpdatePosition(&kfUp, altCm - rangefinderAltOffsetCm, rfR);
     lastZMeasurementUs = nowUs;
+    zObservationSeen = true;
+    zObservationTimeUs = stateTimeUs;
+    sourceFlags |= 1u << 3;
 
     zCal[CAL_Z_RF].rawReading = altCm;
     zCal[CAL_Z_RF].active = true;
@@ -561,6 +647,9 @@ static void feedOpticalFlowMeasurements(timeUs_t nowUs)
     kalmanUpdateVelocity(&kfNorth, velNorth, flowR);
 
     lastXYMeasurementUs = nowUs;
+    xyObservationSeen = true;
+    xyObservationTimeUs = stateTimeUs;
+    sourceFlags |= 1u << 4;
 #else
     UNUSED(nowUs);
 #endif
@@ -589,6 +678,11 @@ static void crossCalibrateOffsets(sensorCalEntry_t *sources, int count, float kf
 void positionEstimatorUpdate(void)
 {
     const timeUs_t nowUs = micros();
+    // State epoch is the start of this estimator update, shared with TIMESYNC.
+    // Position/velocity complete below. Attitude and filtered gyro are the latest
+    // scheduler samples, not interpolated to this epoch (see protocol boundaries).
+    stateTimeUs = mavlinkTimeUs((uint32_t)nowUs);
+    sourceFlags = 0;
     const float dt = HZ_TO_INTERVAL(TASK_ALTITUDE_RATE_HZ);
 
     const bool wantXY = positionEstimatorWantXYFusion();
@@ -644,6 +738,8 @@ void positionEstimatorUpdate(void)
     const float xyVar = (kalmanGetPositionVariance(&kfEast) + kalmanGetPositionVariance(&kfNorth)) * 0.5f;
     estimate.trustXY = 1.0f / (1.0f + xyVar / 10000.0f);
     estimate.trustZ = 1.0f / (1.0f + kalmanGetPositionVariance(&kfUp) / 10000.0f);
+    snapshot.xyEnabled = xyEnabled;
+    captureState();
 }
 
 const positionEstimate3d_t *positionEstimatorGetEstimate(void)
@@ -700,11 +796,13 @@ bool positionEstimatorIsHeadingRequired(void)
 
 void positionEstimatorResetZ(void)
 {
+    stateReset();
     kalmanInit(&kfUp, 0.0f, 0.0f, INITIAL_POS_VAR, INITIAL_VEL_VAR, Q_ACCEL_Z);
     estimate.position.v[ENU_U] = 0.0f;
     estimate.velocity.v[ENU_U] = 0.0f;
     estimate.isValidZ = false;
     lastZMeasurementUs = 0;
+    zObservationSeen = false;
 #ifdef USE_GPS
     gpsAltOffsetCm = 0.0f;
     gpsAltOffsetSet = false;
@@ -724,6 +822,7 @@ void positionEstimatorResetZ(void)
 
 void positionEstimatorResetXY(void)
 {
+    stateReset();
     kalmanInit(&kfEast, 0.0f, 0.0f, INITIAL_POS_VAR, INITIAL_VEL_VAR, Q_ACCEL_XY);
     kalmanInit(&kfNorth, 0.0f, 0.0f, INITIAL_POS_VAR, INITIAL_VEL_VAR, Q_ACCEL_XY);
     estimate.position.v[ENU_E] = 0.0f;
@@ -732,6 +831,7 @@ void positionEstimatorResetXY(void)
     estimate.velocity.v[ENU_N] = 0.0f;
     estimate.isValidXY = false;
     lastXYMeasurementUs = 0;
+    xyObservationSeen = false;
 #ifdef USE_GPS
     gpsArmLocationSet = false;
     if (sensors(SENSOR_GPS) && STATE(GPS_FIX)) {

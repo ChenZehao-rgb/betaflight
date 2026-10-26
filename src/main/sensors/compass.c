@@ -24,6 +24,7 @@
 #include <math.h>
 
 #include "platform.h"
+#include "common/float_bits.h"
 
 #if defined(USE_MAG)
 
@@ -90,6 +91,8 @@
 static timeUs_t magCalEndTime = 0;
 static bool didMovementStart = false;
 static bool magCalProcessActive = false;
+static bool magSampleSeen;
+static timeUs_t lastMagSampleUs;
 
 static compassBiasEstimator_t compassBiasEstimator;
 
@@ -470,6 +473,7 @@ static bool compassDetect(magDev_t *dev, sensor_align_e *alignment)
 
 bool compassInit(void)
 {
+    magSampleSeen = false;
     // initialize and calibration. turn on led during mag calibration (calibration routine blinks it)
 
     sensor_align_e alignment;
@@ -518,6 +522,14 @@ bool compassEnabledAndCalibrated(void)
     return sensors(SENSOR_MAG) && (imuConfig()->trust_mag) && (mag.magADC.x != 0) && (mag.magADC.y != 0) && (mag.magADC.z != 0);
 }
 
+bool compassIsHeadingFresh(void)
+{
+    const timeDelta_t age = cmpTimeUs(micros(), lastMagSampleUs);
+    const float normSquared = sq(mag.magADC.x) + sq(mag.magADC.y) + sq(mag.magADC.z);
+    return compassEnabledAndCalibrated() && !magCalProcessActive && magSampleSeen
+        && age >= 0 && age <= 100000 && float32IsFinite(normSquared) && normSquared > 1.0e-6f;
+}
+
 void compassStartCalibration(void)
 {
     // starting now, the user has CALIBRATION_WAIT_US to start moving the quad and trigger the actual calibration routine
@@ -557,6 +569,8 @@ uint32_t compassUpdate(timeUs_t currentTimeUs)
         return COMPASS_RECHECK_INTERVAL_US; // come back in 1ms, maybe data will be available then
     }
 
+    lastMagSampleUs = currentTimeUs;
+    magSampleSeen = true;
     // if we get here, we have new data to parse
     for (int axis = 0; axis < XYZ_AXIS_COUNT; axis++) {
         mag.magADC.v[axis] = magADCRaw[axis];

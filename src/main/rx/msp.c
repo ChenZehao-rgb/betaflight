@@ -46,8 +46,8 @@ static uint8_t lastRxMspRcFrameChannelCount = 0;
 //    channels to rx_min_usec the instant BOXMSPOVERRIDE activated;
 //  - a short MSP_SET_RAW_RC frame (e.g. AETR-only) would still leave any
 //    masked AUX channel reading from the zero-filled tail of mspFrame[].
-// 300 ms gives honest support for ~5 Hz MSP RC with timing margin.
-#define RX_MSP_RC_FRAME_FRESH_MS 300
+// The PG default of 300 ms preserves low-rate bench tools. Flight configuration
+// uses 50 ms and the companion verifies the setting before permitting output.
 
 float rxMspReadRawRC(const rxRuntimeState_t *rxRuntimeState, uint8_t chan)
 {
@@ -84,7 +84,8 @@ bool rxMspIsRcChannelFresh(uint8_t chan)
     if (chan >= lastRxMspRcFrameChannelCount) {
         return false;
     }
-    return (millis() - lastRxMspRcFrameMs) <= RX_MSP_RC_FRAME_FRESH_MS;
+    const uint32_t timeout = rxConfig()->msp_override_timeout_ms;
+    return timeout > 0 && timeout <= 1000 && (millis() - lastRxMspRcFrameMs) <= timeout;
 }
 
 static uint8_t rxMspFrameStatus(rxRuntimeState_t *rxRuntimeState)

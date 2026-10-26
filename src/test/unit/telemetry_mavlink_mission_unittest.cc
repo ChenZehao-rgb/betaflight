@@ -29,7 +29,10 @@ extern "C" {
     #include "fc/runtime_config.h"
     #include "io/gps.h"
     #include "pg/autopilot.h"
+    // The C header uses C11 spelling; GCC C++ needs its equivalent.
+    #define _Static_assert static_assert
     #include "pg/flight_plan.h"
+    #undef _Static_assert
     #include "flight/flight_plan_nav.h"
     #include "telemetry/mavlink_mission.h"
 
@@ -258,7 +261,7 @@ TEST_F(MavlinkMissionTest, MissionItemReachedEmitted)
     ASSERT_NE(s_reachedListener, nullptr);
     s_reachedListener(2);
 
-    mavMissionUpdate(0); // time 0 avoids a coincident MISSION_CURRENT
+    mavMissionUpdate(0);
     const mavlink_message_t *reached = lastOfType(MAVLINK_MSG_ID_MISSION_ITEM_REACHED);
     ASSERT_NE(reached, nullptr);
     mavlink_mission_item_reached_t mr;
@@ -278,7 +281,7 @@ TEST_F(MavlinkMissionTest, MissionCurrentReflectsExecutorState)
     s_navState = FP_NAV_TARGETING;
     s_navIndex = 1;
 
-    mavMissionUpdate(1000);
+    mavMissionSendCurrent();
     const mavlink_message_t *cur = lastOfType(MAVLINK_MSG_ID_MISSION_CURRENT);
     ASSERT_NE(cur, nullptr);
     mavlink_mission_current_t mc;
@@ -295,7 +298,7 @@ TEST_F(MavlinkMissionTest, MissionCurrentSuppressedForInjectedPlan)
     s_navInjected = true;
     s_navIndex = 2;
 
-    mavMissionUpdate(1000);
+    mavMissionSendCurrent();
     const mavlink_message_t *cur = lastOfType(MAVLINK_MSG_ID_MISSION_CURRENT);
     ASSERT_NE(cur, nullptr);
     mavlink_mission_current_t mc;
@@ -317,4 +320,10 @@ TEST_F(MavlinkMissionTest, SetCurrentDispatchesAndEchoesCursor)
 
     EXPECT_EQ(s_setCurrentArg, 2);
     EXPECT_NE(lastOfType(MAVLINK_MSG_ID_MISSION_CURRENT), nullptr);
+}
+
+TEST_F(MavlinkMissionTest, NoUnrequestedPeriodicMissionCurrent)
+{
+    for (unsigned ms=0; ms<=10000; ms+=100) mavMissionUpdate(ms);
+    EXPECT_EQ(countOfType(MAVLINK_MSG_ID_MISSION_CURRENT), 0);
 }

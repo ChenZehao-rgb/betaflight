@@ -52,7 +52,6 @@
 #define MISSION_UPLOAD_RETRY_MS   1500
 #define MISSION_UPLOAD_MAX_RETRY  5
 #define MISSION_DOWNLOAD_IDLE_MS  5000
-#define MISSION_CURRENT_PERIOD_MS 1000
 
 typedef enum {
     MISSION_IDLE,
@@ -68,7 +67,6 @@ static struct {
     uint8_t  partnerComp;
     timeMs_t lastActivityMs;
     uint8_t  retries;
-    timeMs_t lastCurrentTxMs;
     int16_t  pendingReachedIndex;
     bool     rtlTerminator;     // current upload ends with NAV_RETURN_TO_LAUNCH (last slot discarded)
 } m;
@@ -590,9 +588,8 @@ void mavMissionInit(void)
     flightPlanNavSetReachedListener(onWaypointReached);
 }
 
-// Pack and send MISSION_CURRENT from live executor state. Driven at 1 Hz by
-// mavMissionUpdate() and once immediately in response to MISSION_SET_CURRENT.
-static void sendMissionCurrent(void)
+// On-demand cursor reporting; transfers/reached events still run normally.
+void mavMissionSendCurrent(void)
 {
     const uint16_t total = flightPlanConfig()->waypointCount;
     const bool active = flightPlanNavIsActive();
@@ -657,7 +654,7 @@ bool mavMissionHandleMessage(const mavlink_message_t *msg)
         if (sc.seq <= UINT8_MAX) {
             flightPlanNavSetCurrentIndex((uint8_t)sc.seq);
         }
-        sendMissionCurrent();
+        mavMissionSendCurrent();
         return true;
     }
     case MAVLINK_MSG_ID_MISSION_ACK:
@@ -694,12 +691,7 @@ void mavMissionUpdate(timeMs_t nowMs)
         m.pendingReachedIndex = -1;
     }
 
-    // MISSION_CURRENT @ 1 Hz — lets QGC display the live cursor whether or not
-    // the mission is being executed.
-    if ((nowMs - m.lastCurrentTxMs) >= MISSION_CURRENT_PERIOD_MS) {
-        sendMissionCurrent();
-        m.lastCurrentTxMs = nowMs;
-    }
+
 }
 
 #endif // ENABLE_TELEMETRY_MAVLINK_MISSION

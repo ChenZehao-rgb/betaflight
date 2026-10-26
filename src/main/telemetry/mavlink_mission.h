@@ -36,6 +36,7 @@
 #pragma GCC diagnostic pop
 
 void mavMissionInit(void);
+void mavMissionSendCurrent(void);
 bool mavMissionHandleMessage(const mavlink_message_t *msg);
 void mavMissionUpdate(timeMs_t nowMs);
 

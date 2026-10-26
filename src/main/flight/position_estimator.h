@@ -64,3 +64,35 @@ void positionEstimatorResetXY(void);
 // Returns the GPS location captured when XY estimation became active (arm point).
 // Returns false if no GPS origin has been captured yet.
 bool positionEstimatorGetGpsOrigin(gpsLocation_t *out);
+
+// Latest completed estimator update. ENU SI position/velocity; raw IMU
+// quaternion rotates BF body to NWU; gyro is filtered BF body degrees/s.
+// Telemetry must only copy this snapshot, never resample individual sensors.
+typedef struct fcStateSnapshot_s {
+    uint64_t timeUs;
+    uint32_t sequence;
+    uint32_t resetCounter;
+    float position[3];
+    float velocity[3];
+    float quaternion[4];
+    float bodyRates[3];
+    float positionVariance[3];
+    float velocityVariance[3];
+    float trustXY;
+    float trustZ;
+    uint32_t xyObservationAgeUs;
+    uint32_t zObservationAgeUs;
+    uint32_t sourceFlags; // Observations incorporated in this update; see protocol.
+    uint8_t gpsFixType;
+    bool xyValid;
+    bool zValid;
+    bool headingValid;
+    bool magHeadingFresh;
+    bool armed;
+    bool gpsFix;
+    bool xyEnabled;
+    bool present;
+} fcStateSnapshot_t;
+
+// Cooperative scheduler only: producer and reader must not run concurrently.
+const fcStateSnapshot_t *positionEstimatorGetSnapshot(void);

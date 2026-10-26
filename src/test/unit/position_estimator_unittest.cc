@@ -18,6 +18,11 @@ extern "C" {
 #include "flight/imu.h"
 #include "flight/position.h"
 #include "flight/position_estimator.h"
+#include "telemetry/mavlink_odometry.h"
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wpedantic"
+#include "common/mavlink.h"
+#pragma GCC diagnostic pop
 
 // STATIC_UNIT_TESTED in position_estimator.c — gravity-removed earth-frame
 // linear acceleration in ENU (cm/s^2).
@@ -26,6 +31,7 @@ void getLinearAccelENU(float *accelEast, float *accelNorth, float *accelUp);
 #include "io/gps.h"
 
 #include "sensors/acceleration.h"
+#include "sensors/gyro.h"
 #include "sensors/barometer.h"
 #include "sensors/rangefinder.h"
 #include "sensors/sensors.h"
@@ -43,6 +49,10 @@ uint8_t debugMode = 0;
 int16_t debug[DEBUG16_VALUE_COUNT];
 
 acc_t acc;
+gyro_t gyro;
+void getQuaternion(quaternion_t *q) { *q = (quaternion_t)QUATERNION_INITIALIZE; }
+bool imuIsHeadingValid(void) { return true; }
+bool imuIsMagHeadingValid(void) { return false; }
 matrix33_t rMat;
 gpsSolutionData_t gpsSol;
 
@@ -51,6 +61,7 @@ static bool rfHealthy = false;
 static float rfAltCm = 0.0f;
 static float baroAltCm = 0.0f;
 static timeUs_t fakeMicros = 0;
+static bool newGpsData = true;
 
 bool sensors(uint32_t mask) { return (enabledSensors & mask) != 0; }
 bool rangefinderIsHealthy(void) { return rfHealthy; }
@@ -61,6 +72,7 @@ timeUs_t micros(void) { return fakeMicros; }
 
 bool gpsHasNewData(uint16_t *gpsStamp)
 {
+    if (!newGpsData) return false;
     (*gpsStamp)++;
     return true;
 }
@@ -107,6 +119,7 @@ protected:
         stateFlags = GPS_FIX;
         armingFlags = ARMED;
         fakeMicros = 0;
+        newGpsData = true;
 
         positionConfigMutable()->altitude_source = ALTITUDE_SOURCE_RANGEFINDER_PREFER;
         positionConfigMutable()->altitude_prefer_baro = 100;
@@ -245,3 +258,95 @@ TEST_F(PositionEstimatorTest, EastThrustProducesPositiveEastVelocity)
     EXPECT_GT(positionEstimatorGetEstimate()->velocity.v[ENU_E], 0.0f);
 }
 
+
+TEST_F(PositionEstimatorTest, SnapshotMatchesCompletedFusionAndDoesNotResample)
+{
+    stepEstimator(2);
+    gpsSol.llh.lon = 1200;
+    gpsSol.velned.velE = 150;
+    stepEstimator(1);
+    const auto *s = positionEstimatorGetSnapshot();
+    const auto *e = positionEstimatorGetEstimate();
+    ASSERT_TRUE(s->present);
+    for (int i=0; i<3; ++i) {
+        EXPECT_FLOAT_EQ(e->position.v[i]*.01f, s->position[i]);
+        EXPECT_FLOAT_EQ(e->velocity.v[i]*.01f, s->velocity[i]);
+        EXPECT_GT(s->positionVariance[i], 0);
+        EXPECT_GT(s->velocityVariance[i], 0);
+    }
+    mavlink_status_t status = {};
+    mavlink_message_t message;
+    mavlinkPackOdometry(&message, &status, s);
+    mavlink_odometry_t wire;
+    mavlink_msg_odometry_decode(&message, &wire);
+    EXPECT_FLOAT_EQ(e->position.v[ENU_N]*.01f, wire.x);
+    EXPECT_FLOAT_EQ(e->position.v[ENU_E]*.01f, wire.y);
+    EXPECT_FLOAT_EQ(-e->position.v[ENU_U]*.01f, wire.z);
+    EXPECT_EQ(s->timeUs, wire.time_usec);
+    // A real KF posterior need not equal the raw GPS position/velocity.
+    EXPECT_NE(gpsSol.llh.lon*.01f,s->position[ENU_E]);
+    const auto stamp=s->timeUs; const auto sequence=s->sequence;
+    fakeMicros+=1234;
+    EXPECT_EQ(stamp,positionEstimatorGetSnapshot()->timeUs);
+    EXPECT_EQ(sequence,positionEstimatorGetSnapshot()->sequence);
+    stepEstimator();
+    EXPECT_EQ(stamp+11234,positionEstimatorGetSnapshot()->timeUs);
+}
+
+TEST_F(PositionEstimatorTest, ObservationOutageAgeTimeoutAndRecovery)
+{
+    stepEstimator(2);
+    auto reset=positionEstimatorGetSnapshot()->resetCounter;
+    EXPECT_EQ(0u,positionEstimatorGetSnapshot()->xyObservationAgeUs);
+    newGpsData=false;
+    stepEstimator(150);
+    EXPECT_EQ(1500000u,positionEstimatorGetSnapshot()->xyObservationAgeUs);
+    EXPECT_TRUE(positionEstimatorGetSnapshot()->xyValid); // Existing 2s validity retained.
+    stepEstimator(51);
+    EXPECT_FALSE(positionEstimatorGetSnapshot()->xyValid);
+    EXPECT_EQ(2010000u,positionEstimatorGetSnapshot()->xyObservationAgeUs);
+    newGpsData=true; stepEstimator();
+    EXPECT_TRUE(positionEstimatorGetSnapshot()->xyValid);
+    EXPECT_EQ(0u,positionEstimatorGetSnapshot()->xyObservationAgeUs);
+    EXPECT_EQ(reset,positionEstimatorGetSnapshot()->resetCounter); // Same origin.
+    stateFlags=0; stepEstimator();
+    EXPECT_FALSE(positionEstimatorGetSnapshot()->xyEnabled);
+    stateFlags=GPS_FIX; stepEstimator();
+    EXPECT_EQ(reset+1,positionEstimatorGetSnapshot()->resetCounter); // XY restart + immediate origin = one event.
+}
+
+TEST_F(PositionEstimatorTest, ResetEventsAndLateGpsOriginCountExactlyOnce)
+{
+    const auto initial=positionEstimatorGetSnapshot()->resetCounter;
+    EXPECT_FALSE(positionEstimatorGetSnapshot()->present);
+    stepEstimator();
+    EXPECT_EQ(initial+1,positionEstimatorGetSnapshot()->resetCounter);
+    positionEstimatorResetXY();
+    EXPECT_FALSE(positionEstimatorGetSnapshot()->present);
+    stepEstimator();
+    EXPECT_EQ(initial+2,positionEstimatorGetSnapshot()->resetCounter);
+    positionEstimatorResetZ(); stepEstimator();
+    EXPECT_EQ(initial+3,positionEstimatorGetSnapshot()->resetCounter);
+    positionEstimatorInit();
+    EXPECT_EQ(initial+4,positionEstimatorGetSnapshot()->resetCounter);
+    stateFlags=0;
+    positionEstimatorEnableXY(true); // Reinitialize with no GPS origin available.
+    EXPECT_EQ(initial+5,positionEstimatorGetSnapshot()->resetCounter);
+    stateFlags=GPS_FIX; stepEstimator(); // Late origin now captured, distinct event.
+    EXPECT_EQ(initial+6,positionEstimatorGetSnapshot()->resetCounter);
+    stepEstimator();
+    EXPECT_EQ(initial+6,positionEstimatorGetSnapshot()->resetCounter);
+}
+
+TEST_F(PositionEstimatorTest, DisarmedXYInvalidAndNeverObservedAgesUnknown)
+{
+    armingFlags=0; enabledSensors=0;
+    stepEstimator();
+    const auto *s=positionEstimatorGetSnapshot();
+    EXPECT_FALSE(s->xyValid); EXPECT_FALSE(s->xyEnabled); EXPECT_FALSE(s->armed);
+    EXPECT_EQ(UINT32_MAX,s->xyObservationAgeUs);
+    EXPECT_EQ(UINT32_MAX,s->zObservationAgeUs);
+    EXPECT_EQ(0u,s->sourceFlags);
+    EXPECT_FLOAT_EQ(1.0f,s->positionVariance[ENU_E]); // 10000 cm^2 -> 1 m^2.
+    EXPECT_FLOAT_EQ(1.0f,s->velocityVariance[ENU_E]);
+}

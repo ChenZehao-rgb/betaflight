@@ -35,8 +35,9 @@ extern "C" {
 static uint32_t simulationMillis = 0;
 
 extern "C" {
-    uint32_t millis(void) { return simulationMillis; }
-    uint32_t micros(void) { return simulationMillis * 1000; }
+rxConfig_t rxConfig_System;
+uint32_t millis(void) { return simulationMillis; }
+uint32_t micros(void) { return simulationMillis * 1000; }
 }
 
 // rxMspIsRcChannelFresh returns true only when the most recent MSP_SET_RAW_RC
@@ -46,6 +47,7 @@ extern "C" {
 TEST(MspOverrideTest, ChannelFreshness)
 {
     // Before any frame is received, every channel is stale.
+    rxConfigMutable()->msp_override_timeout_ms = 300;
     simulationMillis = 1000;
     EXPECT_FALSE(rxMspIsRcChannelFresh(0));
     EXPECT_FALSE(rxMspIsRcChannelFresh(3));
@@ -86,4 +88,21 @@ TEST(MspOverrideTest, ChannelFreshness)
     rxMspFrameReceive(frame4, 4);
     EXPECT_TRUE(rxMspIsRcChannelFresh(3));
     EXPECT_FALSE(rxMspIsRcChannelFresh(5));
+}
+
+TEST(MspOverrideTest, FlightTimeoutAndWrap) {
+	rxConfigMutable()->msp_override_timeout_ms = 50;
+	uint16_t frame[] = {1500, 1500, 1000, 1500};
+	simulationMillis = UINT32_MAX - 20;
+	rxMspFrameReceive(frame, 4);
+	simulationMillis += 50;
+	EXPECT_TRUE(rxMspIsRcChannelFresh(0));
+	++simulationMillis;
+	EXPECT_FALSE(rxMspIsRcChannelFresh(0));
+	rxMspFrameReceive(frame, 4);
+	EXPECT_FALSE(rxMspIsRcChannelFresh(4));
+	rxConfigMutable()->msp_override_timeout_ms = 0;
+	EXPECT_FALSE(rxMspIsRcChannelFresh(0));
+	rxConfigMutable()->msp_override_timeout_ms = 1001;
+	EXPECT_FALSE(rxMspIsRcChannelFresh(0));
 }
