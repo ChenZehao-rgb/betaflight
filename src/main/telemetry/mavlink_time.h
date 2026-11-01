@@ -11,4 +11,5 @@ typedef struct mavlinkClock_s {
 uint64_t mavlinkClockUpdate(mavlinkClock_t *clock, uint32_t current);
 
 // One shared cooperative-task uptime epoch for state production and TIMESYNC.
+// SITL uses host monotonic uptime rather than the variable-rate physics clock.
 uint64_t mavlinkTimeUs(uint32_t current);

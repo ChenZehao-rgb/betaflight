@@ -44,6 +44,14 @@ static const struct serialPortVTable tcpVTable; // Forward
 static tcpPort_t tcpSerialPorts[SERIAL_PORT_COUNT];
 static bool tcpPortInitialized[SERIAL_PORT_COUNT];
 static bool tcpStart = false;
+static pthread_mutex_t tcpLock = PTHREAD_MUTEX_INITIALIZER;
+
+void tcpUpdate(void)
+{
+    pthread_mutex_lock(&tcpLock);
+    dyad_update();
+    pthread_mutex_unlock(&tcpLock);
+}
 
 bool tcpIsStart(void)
 {
@@ -133,6 +141,10 @@ static tcpPort_t* tcpReconfigure(tcpPort_t *s, int id)
 
 serialPort_t *serTcpOpen(serialPortIdentifier_e identifier, serialReceiveCallbackPtr rxCallback, void *rxCallbackData, uint32_t baudRate, portMode_e mode, portOptions_e options)
 {
+    // dyad_newStream publishes a CLOSED stream before listen configures it.
+    // The event thread must not destroy it (or observe half-initialized UART
+    // buffers) while the main thread is opening the port.
+    pthread_mutex_lock(&tcpLock);
     tcpPort_t *s = NULL;
 
     int id = findSerialPortIndexByIdentifier(identifier);
@@ -142,6 +154,7 @@ serialPort_t *serTcpOpen(serialPortIdentifier_e identifier, serialReceiveCallbac
     }
 
     if (!s) {
+        pthread_mutex_unlock(&tcpLock);
         return NULL;
     }
 
@@ -162,6 +175,7 @@ serialPort_t *serTcpOpen(serialPortIdentifier_e identifier, serialReceiveCallbac
     s->port.baudRate = baudRate;
     s->port.options = options;
 
+    pthread_mutex_unlock(&tcpLock);
     return (serialPort_t *)s;
 }
 
@@ -228,6 +242,12 @@ static void tcpWrite(serialPort_t *instance, uint8_t ch)
     tcpPort_t *s = (tcpPort_t *)instance;
     pthread_mutex_lock(&s->txLock);
 
+    // TCP otherwise drains a complete frame instantaneously. Model the UART
+    // line rate so sample-to-wire latency matches the configured serial link.
+    const double now = micros64_real();
+    if (s->txWireTime < now) s->txWireTime = now;
+    s->txWireTime += 10000000.0 / s->port.baudRate; // start + 8 data + stop
+    s->txReady[s->port.txBufferHead] = s->txWireTime;
     s->port.txBuffer[s->port.txBufferHead] = ch;
     if (s->port.txBufferHead + 1 >= s->port.txBufferSize) {
         s->port.txBufferHead = 0;
@@ -244,16 +264,16 @@ void tcpDataOut(tcpPort_t *instance)
     if (s->conn == NULL) return;
     pthread_mutex_lock(&s->txLock);
 
-    if (s->port.txBufferHead < s->port.txBufferTail) {
-        // send data till end of buffer
-        int chunk = s->port.txBufferSize - s->port.txBufferTail;
-        dyad_write(s->conn, (const void *)&s->port.txBuffer[s->port.txBufferTail], chunk);
-        s->port.txBufferTail = 0;
+    const double now = micros64_real();
+    while (s->port.txBufferTail != s->port.txBufferHead && s->txReady[s->port.txBufferTail] <= now) {
+        const uint32_t begin = s->port.txBufferTail;
+        uint32_t end = begin;
+        do {
+            ++end;
+        } while (end < s->port.txBufferSize && end != s->port.txBufferHead && s->txReady[end] <= now);
+        dyad_write(s->conn, (const void *)&s->port.txBuffer[begin], end - begin);
+        s->port.txBufferTail = end == s->port.txBufferSize ? 0 : end;
     }
-    int chunk = s->port.txBufferHead - s->port.txBufferTail;
-    if (chunk)
-        dyad_write(s->conn, (const void*)&s->port.txBuffer[s->port.txBufferTail], chunk);
-    s->port.txBufferTail = s->port.txBufferHead;
 
     pthread_mutex_unlock(&s->txLock);
 }

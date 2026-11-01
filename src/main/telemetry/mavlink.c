@@ -800,15 +800,37 @@ static bool setMessageUpdateInterval(uint32_t messageId, uint32_t intervalMs)
 static void processMAVLinkTelemetry(void)
 {
     const timeMs_t now = millis();
+    bool priorityDue = false;
     for (unsigned i = 0; i < TELEMETRIES_OUTPUT_MESSAGES_COUNT; ++i) {
         mavlinkTelemetryOutputMessage_t *stream = &mavTelemetryOutputMessages[i];
         uint32_t nextDeadline = stream->updateTime;
         if (mavlinkStreamDue(now, &nextDeadline, stream->updateInterval)) {
+            priorityDue = true;
             // If the 100Hz producer is just behind this task, poll on the next
             // 1ms tick instead of losing a full 10ms slot. Never resend a sample.
             if (stream->sendMessageFunc()) {
                 stream->updateTime = nextDeadline;
             }
+        }
+    }
+    // ID 248 controls health cadence and enables/disables both private types.
+    // Origin remains fixed at 1 Hz plus changes, only on otherwise idle slots.
+    static fcStateSnapshot_t lastOrigin;
+    static uint32_t originDeadline;
+    const fcStateSnapshot_t *s = positionEstimatorGetSnapshot();
+    if (priorityDue || getMessageUpdateInterval(MAVLINK_MSG_ID_V2_EXTENSION) < 0 || !s->present) {
+        return;
+    }
+    const bool changed = !lastOrigin.present || s->resetCounter != lastOrigin.resetCounter ||
+        s->xyOriginValid != lastOrigin.xyOriginValid || s->gpsZOriginValid != lastOrigin.gpsZOriginValid ||
+        s->originLatitude != lastOrigin.originLatitude || s->originLongitude != lastOrigin.originLongitude ||
+        s->longitudeScale != lastOrigin.longitudeScale || s->gpsAltitudeOffsetCm != lastOrigin.gpsAltitudeOffsetCm;
+    if (changed || (int32_t)(now - originDeadline) >= 0) {
+        mavlinkPackGeographicOrigin(&mavMsg, mavlink_get_channel_status(MAVLINK_COMM_0), s);
+        const uint16_t length = mavlink_msg_to_send_buffer(mavBuffer, &mavMsg);
+        if (mavlinkSerialWrite(mavBuffer, length)) {
+            lastOrigin = *s;
+            originDeadline = now + BF_ORIGIN_INTERVAL_MS;
         }
     }
 }

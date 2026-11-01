@@ -69,6 +69,7 @@
 #include "rx/rx.h"
 #include "rx/spektrum.h"
 
+#include "fc/init.h"
 #include "fc/rc.h"
 #include "fc/rc_controls.h"
 #include "fc/runtime_config.h"
@@ -82,10 +83,7 @@
 #include "udplink.h"
 #include "sitl_gyro.h"
 
-// ENABLE_GAZEBO_BRIDGE is a boolean selector for the gyro yaw sign (passed to
-// sitlGyroBodyFromSim below). target.h defaults it to 1; configs set 0 for the
-// legacy bridges. Require it to be explicitly 0 or 1 so an accidental non-boolean
-// value (which would quietly read as "Gazebo") fails the build instead (see #15294).
+// Select Gazebo versus legacy packet attitude/GPS conventions explicitly.
 STATIC_ASSERT((ENABLE_GAZEBO_BRIDGE) == 0 || (ENABLE_GAZEBO_BRIDGE) == 1,
               ENABLE_GAZEBO_BRIDGE_must_be_0_or_1);
 
@@ -274,6 +272,13 @@ static void sendMotorUpdate(void)
 
 static void updateState(const fdm_packet* pkt)
 {
+    // FDM can arrive before virtual sensor pointers and their mutexes exist.
+    // Keep the simulator handshake alive until firmware initialization finishes.
+    if (!(systemState & SYSTEM_STATE_READY)) {
+        sendMotorUpdate();
+        return;
+    }
+
     static double last_timestamp = 0; // in seconds
     static uint64_t last_realtime = 0; // in uS
     static struct timespec last_ts; // last packet
@@ -300,13 +305,9 @@ static void updateState(const fdm_packet* pkt)
     z = constrain(-pkt->imu_linear_acceleration_xyz[2] * ACC_SCALE, -32767, 32767);
     virtualAccSet(virtualAccDev, x, y, z);
 
-    // Map simulator IMU angular velocity onto Betaflight gyro axes. The yaw (Z)
-    // polarity is bridge-specific (see sitlGyroBodyFromSim() for the FRD/legacy
-    // rationale); ENABLE_GAZEBO_BRIDGE selects it. Keeping the mapping in one
-    // helper prevents the bridge split from being silently dropped by edits to
-    // this function, which is what caused regression #15294.
+    // Use the same FLU gyro frame for the rate loop, AHRS and MAVLink state.
     double gyroRoll, gyroPitch, gyroYaw;
-    sitlGyroBodyFromSim(pkt->imu_angular_velocity_rpy, ENABLE_GAZEBO_BRIDGE, &gyroRoll, &gyroPitch, &gyroYaw);
+    sitlGyroBodyFromSim(pkt->imu_angular_velocity_rpy, &gyroRoll, &gyroPitch, &gyroYaw);
     x = constrain(gyroRoll  * GYRO_SCALE * RAD2DEG, -32767, 32767);
     y = constrain(gyroPitch * GYRO_SCALE * RAD2DEG, -32767, 32767);
     z = constrain(gyroYaw   * GYRO_SCALE * RAD2DEG, -32767, 32767);
@@ -325,22 +326,8 @@ static void updateState(const fdm_packet* pkt)
     // Consumed by the direct-attitude path and by the virtual mag feed, which
     // must use the same rotation or mag fusion fights the fed attitude.
 #if ENABLE_GAZEBO_BRIDGE
-    // The Gazebo BetaflightPlugin sends the quaternion conjugated by Rx(π)
-    // (q_plugin = Rx(π) * M * Rx(π), with M the FLU-body to ENU-world
-    // attitude). Undo the conjugation (negate qy/qz), then rotate the world
-    // frame by Rz(π/2) (ENU -> NWU): q = Rz(π/2) * Rx(π) * q_plugin * Rx(π).
-    // FLU body equals Betaflight's internal NWU body, so the result is the
-    // proper body-to-world rotation - the Euler display and every rMat
-    // vector consumer (position estimator, mag fusion) agree at any heading.
-    const float pktQw = pkt->imu_orientation_quat[0];
-    const float pktQx = pkt->imu_orientation_quat[1];
-    const float pktQy = -pkt->imu_orientation_quat[2];
-    const float pktQz = -pkt->imu_orientation_quat[3];
-    static const float k = 0.70710678f; // cos(π/4) = sin(π/4) = √2/2
-    const float attQw = k * (pktQw - pktQz);
-    const float attQx = k * (pktQx - pktQy);
-    const float attQy = k * (pktQy + pktQx);
-    const float attQz = k * (pktQz + pktQw);
+    float attQw, attQx, attQy, attQz;
+    sitlAttitudeFromGazebo(pkt->imu_orientation_quat, &attQw, &attQx, &attQy, &attQz);
 #else
     // Legacy bridges send the body-to-world quaternion directly
     const float attQw = pkt->imu_orientation_quat[0];
@@ -352,10 +339,9 @@ static void updateState(const fdm_packet* pkt)
 #if defined(USE_VIRTUAL_MAG)
     {
         // Synthetic earth field, NWU, 4096 counts: 60° inclination and 2° east
-        // declination so every body component is generically nonzero
-        // (compassEnabledAndCalibrated requires nonzero x, y and z). The 2°
-        // heading bias is negligible against scenario tolerances; the vertical
-        // component is ignored by imuCalcMagErr's horizontal projection.
+        // declination. Individual body components may cross zero during flight.
+        // This must match the simulator EEPROM's mag_declination = 20
+        // (decidegrees); the vertical component is ignored by imuCalcMagErr.
         static const float fieldN = 2046.8f;
         static const float fieldW = -71.5f;
         static const float fieldU = -3547.2f;
@@ -377,8 +363,8 @@ static void updateState(const fdm_packet* pkt)
 #endif
 
 #if !defined(USE_IMU_CALC)
-#if defined(SET_IMU_FROM_EULER)
-    // set from Euler
+#if defined(SET_IMU_FROM_EULER) && !ENABLE_GAZEBO_BRIDGE
+    // Legacy display-only path. Gazebo always updates q/rMat for vector consumers.
     double qw = pkt->imu_orientation_quat[0];
     double qx = pkt->imu_orientation_quat[1];
     double qy = pkt->imu_orientation_quat[2];
@@ -567,10 +553,13 @@ static void* tcpThread(void* data)
 
     dyad_init();
     dyad_setTickInterval(0.001f);
-    dyad_setUpdateTimeout(0.001f);
+    // Keep the existing 1 ms poll interval outside the dyad mutex, so a
+    // continuously polling worker cannot starve the main thread opening UARTs.
+    dyad_setUpdateTimeout(0);
 
     while (workerRunning) {
-        dyad_update();
+        tcpUpdate();
+        delayMicroseconds_real(1000);
     }
 
     dyad_shutdown();

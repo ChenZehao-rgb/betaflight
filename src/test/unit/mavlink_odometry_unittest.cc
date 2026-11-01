@@ -229,13 +229,13 @@ protected:
         mavlinkTestProcess();
     }
 };
-TEST_F(MavlinkTransport, Actual100And50HzAndOnlyTwoStreams)
+TEST_F(MavlinkTransport, Actual100And50HzWithIdleSlotOrigin)
 {
     for (unsigned ms=0; ms<=1000; ++ms) tick(ms);
     const auto stats = mavlinkGetTelemetryStats();
     EXPECT_EQ(100u, stats->odometryFrames); EXPECT_EQ(49u, stats->healthFrames); // First health deadline 25ms.
     EXPECT_EQ(0u, stats->droppedFrames);
-    unsigned odo=0, health=0;
+    unsigned odo=0, health=0, origin=0;
     uint64_t previous=0; int previousSeq=-1;
     for (const auto &wire : writes) {
         auto msg=decode(wire);
@@ -244,9 +244,13 @@ TEST_F(MavlinkTransport, Actual100And50HzAndOnlyTwoStreams)
         if (msg.msgid == 331) {
             mavlink_odometry_t o; mavlink_msg_odometry_decode(&msg, &o);
             EXPECT_GT(o.time_usec, previous); previous=o.time_usec; ++odo;
-        } else { EXPECT_EQ(248u, msg.msgid); ++health; }
+        } else {
+            EXPECT_EQ(248u, msg.msgid);
+            if (mavlink_msg_v2_extension_get_message_type(&msg) == 0xBF02) ++origin;
+            else { EXPECT_EQ(0xBF01, mavlink_msg_v2_extension_get_message_type(&msg)); ++health; }
+        }
     }
-    EXPECT_EQ(100u, odo); EXPECT_EQ(49u, health);
+    EXPECT_EQ(100u, odo); EXPECT_EQ(49u, health); EXPECT_EQ(1u, origin);
     for (auto id : {0,1,24,30,33,35,65,74,105,137,147}) EXPECT_FALSE(mavlinkTestSetInterval(id,10));
     EXPECT_TRUE(mavlinkTestSetInterval(331, UINT32_MAX));
     const auto count=stats->odometryFrames;
@@ -300,4 +304,47 @@ TEST_F(MavlinkTransport, ProducerJustAfterDeadlineDoesNotLoseTenMillisecondSlot)
         mavlinkTestProcess();
     }
     EXPECT_EQ(100u,mavlinkGetTelemetryStats()->odometryFrames);
+}
+
+TEST(MavlinkOrigin, FullIdentityAndTruncatedZeroTail)
+{
+    auto s = sample();
+    s.xyOriginValid = s.gpsZOriginValid = true;
+    s.originLatitude = -123456789; s.originLongitude = 1800000000;
+    s.longitudeScale = .75f; s.gpsAltitudeOffsetCm = 0;
+    s.resetCounter = 0xfedcba98;
+    mavlink_message_t msg;
+    mavlink_status_t status = {};
+    mavlinkPackGeographicOrigin(&msg, &status, &s);
+    uint8_t bytes[MAVLINK_MAX_PACKET_LEN];
+    const auto n = mavlink_msg_to_send_buffer(bytes, &msg);
+    auto received = decode(std::vector<uint8_t>(bytes, bytes+n));
+    EXPECT_LT(received.len, 37); // Z offset and reserved trailing zeros truncated.
+    mavlink_v2_extension_t v; mavlink_msg_v2_extension_decode(&received, &v);
+    EXPECT_EQ(0xBF02, v.message_type);
+    EXPECT_EQ(1, v.payload[0]); EXPECT_EQ(32, v.payload[1]);
+    EXPECT_EQ(3u, le(v.payload+2, 2));
+    EXPECT_EQ(s.resetCounter, le(v.payload+4, 4)); EXPECT_EQ(s.timeUs, le(v.payload+8, 8));
+    EXPECT_EQ(uint32_t(s.originLatitude), le(v.payload+16, 4));
+    EXPECT_EQ(uint32_t(s.originLongitude), le(v.payload+20, 4));
+    EXPECT_FLOAT_EQ(.75f, leFloat(v.payload+24)); EXPECT_FLOAT_EQ(0, leFloat(v.payload+28));
+    s.present = false;
+    mavlinkPackGeographicOrigin(&msg, &status, &s);
+    mavlink_msg_v2_extension_decode(&msg, &v);
+    EXPECT_EQ(0u, le(v.payload+2, 2));
+}
+
+TEST_F(MavlinkTransport, OriginChangesArePromptAnd248DisableCoversBothTypes)
+{
+    tick(10); tick(11);
+    writes.clear();
+    state.gpsZOriginValid = true;
+    tick(12);
+    ASSERT_EQ(1u, writes.size());
+    auto received = decode(writes[0]);
+    EXPECT_EQ(0xBF02, mavlink_msg_v2_extension_get_message_type(&received));
+    EXPECT_TRUE(mavlinkTestSetInterval(248, UINT32_MAX));
+    writes.clear(); ++state.resetCounter;
+    for (unsigned ms = 13; ms <= 1200; ++ms) tick(ms);
+    for (const auto &wire : writes) EXPECT_EQ(331u, decode(wire).msgid);
 }

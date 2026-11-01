@@ -19,9 +19,16 @@ from sitl_harness import FdmFeed, Sitl, FDM_PORT, HOME_LAT, HOME_LON, HOME_ALT_M
 
 
 class StaticSensorFeed(FdmFeed):
+    clock_rate = 1.0
+
     def run(self):
+        last = time.monotonic()
+        simulation_time = 0.0
         while self.running:
-            packet = struct.pack('<18d', time.monotonic() - self.t0,
+            now = time.monotonic()
+            simulation_time += (now - last) * self.clock_rate
+            last = now
+            packet = struct.pack('<18d', simulation_time,
                 0, 0, 0, 0, 0, -9.80665, math.sqrt(.5), 0, 0, math.sqrt(.5),
                 0, 0, 0, HOME_LON, HOME_LAT, HOME_ALT_M, 101325)
             self.sock.sendto(packet, ('127.0.0.1', FDM_PORT))
@@ -36,6 +43,7 @@ def collect(link, seconds=3):
         if msg:
             assert msg.get_type() != 'BAD_DATA', msg
             assert msg.get_msgbuf()[0] == 0xfd, msg
+            msg.host_receive_time = time.monotonic()
             data[msg.get_type()].append(msg)
     return data
 
@@ -133,6 +141,16 @@ def main():
             assert ts and ts[-1].tc1 > 0
             first = responses['ODOMETRY'][0].time_usec
             assert abs(ts[-1].tc1/1000-first) < 100000
+            # Physics may change speed; telemetry timestamps must still advance
+            # with the companion's monotonic clock, including observation ages.
+            for clock_rate in (.5, 1.5, 1.0):
+                feed.clock_rate = clock_rate
+                states = collect(link, 2)['ODOMETRY']
+                assert len(states) > 20
+                ratio = ((states[-1].time_usec - states[0].time_usec) * 1e-6 /
+                         (states[-1].host_receive_time - states[0].host_receive_time))
+                assert abs(ratio - 1.) < .02, (clock_rate, ratio)
+                print(f'physics rate={clock_rate}: telemetry/host clock ratio={ratio:.6f}', flush=True)
             print('PASS: MAVLink2 CRC decode, state timestamps, rates, health pairing, old-stream denial, disable/restore, capabilities, HEARTBEAT and TIMESYNC', flush=True)
         except Exception:
             log_path = os.path.join(directory, 'sitl.log')

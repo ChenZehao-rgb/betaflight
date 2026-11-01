@@ -203,6 +203,14 @@ static uint32_t observationAge(bool seen, uint64_t last)
     return !seen || age >= UINT32_MAX ? UINT32_MAX : (uint32_t)age;
 }
 
+#ifdef USE_GPS
+static uint16_t gpsStamp = 0;
+static gpsLocation_t armLocationGps;
+static bool gpsArmLocationSet = false;
+static float gpsAltOffsetCm = 0.0f;
+static bool gpsAltOffsetSet = false;
+#endif
+
 static void captureState(void)
 {
     const positionEstimate3d_t *state = positionEstimatorGetEstimate();
@@ -231,6 +239,12 @@ static void captureState(void)
     snapshot.armed = ARMING_FLAG(ARMED);
     snapshot.gpsFix = STATE(GPS_FIX);
 #ifdef USE_GPS
+    snapshot.xyOriginValid = gpsArmLocationSet;
+    snapshot.gpsZOriginValid = gpsAltOffsetSet;
+    snapshot.originLatitude = gpsArmLocationSet ? armLocationGps.lat : 0;
+    snapshot.originLongitude = gpsArmLocationSet ? armLocationGps.lon : 0;
+    snapshot.longitudeScale = getGpsCosLat();
+    snapshot.gpsAltitudeOffsetCm = gpsAltOffsetSet ? gpsAltOffsetCm : 0;
     // The base GPS solution exposes a fix flag, not receiver RTK/2D type.
     snapshot.gpsFixType = !sensors(SENSOR_GPS) ? 0 : (STATE(GPS_FIX) ? 3 : 1);
 #else
@@ -255,14 +269,6 @@ static timeUs_t lastXYMeasurementUs = 0;
 static timeUs_t lastZMeasurementUs = 0;
 
 static sensorCalEntry_t zCal[CAL_Z_COUNT];
-
-#ifdef USE_GPS
-static uint16_t gpsStamp = 0;
-static gpsLocation_t armLocationGps;
-static bool gpsArmLocationSet = false;
-static float gpsAltOffsetCm = 0.0f;
-static bool gpsAltOffsetSet = false;
-#endif
 
 #ifdef USE_BARO
 static float baroAltOffsetCm = 0.0f;
@@ -677,6 +683,14 @@ static void crossCalibrateOffsets(sensorCalEntry_t *sources, int count, float kf
 
 void positionEstimatorUpdate(void)
 {
+#ifdef USE_GPS
+    // Home can change the projection without changing armLocationGps. Announce
+    // that coordinate change before the next completed update; an existing reset
+    // already invalidates the snapshot. First origin acquisition needs no extra reset.
+    if (snapshot.present && snapshot.xyOriginValid && snapshot.longitudeScale != getGpsCosLat()) {
+        stateReset();
+    }
+#endif
     const timeUs_t nowUs = micros();
     // State epoch is the start of this estimator update, shared with TIMESYNC.
     // Position/velocity complete below. Attitude and filtered gyro are the latest

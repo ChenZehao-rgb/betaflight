@@ -519,7 +519,11 @@ bool compassInit(void)
 
 bool compassEnabledAndCalibrated(void)
 {
-    return sensors(SENSOR_MAG) && (imuConfig()->trust_mag) && (mag.magADC.x != 0) && (mag.magADC.y != 0) && (mag.magADC.z != 0);
+    // A valid field can align with a body axis. Reject unavailable/nonfinite
+    // vectors, not a single zero component as the aircraft rotates.
+    return sensors(SENSOR_MAG) && imuConfig()->trust_mag
+        && float32IsFinite(mag.magADC.x) && float32IsFinite(mag.magADC.y) && float32IsFinite(mag.magADC.z)
+        && (mag.magADC.x != 0 || mag.magADC.y != 0 || mag.magADC.z != 0);
 }
 
 bool compassIsHeadingFresh(void)

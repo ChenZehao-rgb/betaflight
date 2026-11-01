@@ -1,6 +1,6 @@
 # Betaflight fused-state MAVLink protocol
 
-Version: BF_ESTIMATOR_HEALTH_V1, 2026-10-26.
+Version: BF_ESTIMATOR_HEALTH_V1 (unchanged), BF_GEOGRAPHIC_ORIGIN_V1 added 2026-11-01.
 Base: `2026.6.1` / `6dbc4218fd6bc33bf16ea32c670304d4f89321d5`.
 Local branch: `mavlink_odometry`.
 Selective reference: `mavlink-HZ-prompt` / `c213bef857c8a5921c5c538c9c51995e66273411`.
@@ -16,9 +16,13 @@ The CLI permits 921600 for telemetry. This work does not connect/configure a boa
 |---|---|---|---|
 | 331 | ODOMETRY | 100 Hz | 10000 us |
 | 248 | V2_EXTENSION, message_type 0xBF01 | 50 Hz | 20000 us |
+| 248 | V2_EXTENSION, message_type 0xBF02 | 1 Hz + mapping changes | fixed, see below |
 
 `MAV_CMD_SET_MESSAGE_INTERVAL` supports only these two IDs. Negative disables; zero
-restores default; positive selects an interval clamped to the minimum. Positive
+restores default; positive selects an interval clamped to the minimum. For ID 248,
+the requested interval applies to health; disabling 248 disables both private
+types. Origin cadence remains fixed at 1 Hz plus mapping/validity changes. There
+is only one ID-248 stream-table entry and no subtype-specific interval command. Positive
 intervals above the minimum are rounded down to whole milliseconds. Nonfinite and
 excessive values are denied. Legacy stream settings remain in PG/CLI for config
 compatibility but do not control this link. Old IDs cannot be re-enabled.
@@ -74,8 +78,8 @@ q_ENU_FLU = [k*(w+z), k*(x+y), k*(x-y), k*(w-z)]
 ```
 
 Tests cover North/East/South/West, roll/pitch, fixed motion directions, rates and
-normalization. The ROS source was read for convention verification only: the current
-raw-sensor receiver still needs a new ODOMETRY/health decoding path before MPC use.
+normalization. The paired Agilicious ROS receiver decodes ODOMETRY/health and the
+origin extension below; it dispatches private subtypes before health validation.
 
 ## Snapshot and clock boundaries
 
@@ -104,6 +108,72 @@ ROS must track a boot session, reset timesync on reboot/reconnect/time regressio
 and clear references when reset_counter changes. A reconnect starts a new receiver
 session even if a reboot cannot be distinguished from cable interruption. Counters
 are not unique boot identifiers.
+
+## BF_GEOGRAPHIC_ORIGIN_V1
+
+Unused private subtype **0xBF02** is allocated for the native FC mapping, without
+changing health 0xBF01 or its 68-byte layout. Standard V2_EXTENSION targets are
+zero. The first 32 payload bytes are used; bytes 32..248 are zero. All fields are
+little-endian; floats are IEEE-754 binary32. MAVLink2 may trim any trailing zero
+bytes (including a zero altitude offset); decoders restore those bytes before
+checking version/length. Unknown flags, nonzero reserved tail, malformed numerics
+or version/length are rejected by the paired receiver, independently of health.
+
+| Offset | Type | Meaning |
+|---|---|---|
+| 0 | uint8 | version=1 |
+| 1 | uint8 | payload_length=32 |
+| 2 | uint16 | bit0 XY origin valid; bit1 GPS Z baseline valid; other bits zero |
+| 4 | uint32 | complete resetCounter |
+| 8 | uint64 | completed snapshot timeUs, FC boot microseconds |
+| 16 | int32 | armLocationGps.lat, degE7, north positive |
+| 20 | int32 | armLocationGps.lon, degE7, east positive |
+| 24 | float32 | actual getGpsCosLat(), dimensionless |
+| 28 | float32 | independent gpsAltOffsetCm, MSL centimetres |
+
+These fields are captured inside `captureState()` with the completed estimator
+update. Sending never reads live home/GPS or recomputes latitude cosine. Zero
+latitude/longitude/altitude are valid when their flags are set. A missing XY or
+GPS Z baseline is represented by a clear flag; numeric placeholders are unusable.
+No origin frame is sent while the completed snapshot is absent.
+
+GPS XY measurements use `GPS_distance2d(&armLocationGps, &gpsSol.llh, ...)`.
+The scale is set by GPS home updates and may differ from cos(arm latitude).
+Before the next estimator update, a changed scale of an already valid mapping
+calls the existing `stateReset()`; filters, capture rules and fusion weights are
+unchanged. Existing EnableXY/ResetXY/late capture/ResetZ reset events remain.
+Initial GPS Z baseline acquisition adds no reset. If another reset already
+invalidated the snapshot, scale capture belongs to that existing reset.
+
+Native mapping, in metres and degrees:
+
+```
+K = double(EARTH_ANGLE_TO_CM) * GPS_DEGREES_DIVIDER * 0.01
+E = wrap_to_plus_minus_180(lon - lon0) * K * longitude_scale
+N = (lat - lat0) * K
+U = altitude_msl - gpsAltOffsetCm * 0.01
+```
+
+`io/gps.h` currently defines `(111.3195f * 1000 * 100 / 10000000L)`;
+its binary32 value is 1.1131949424743652 cm/degE7, so K is
+111319.49424743652 m/degree (approximately 111319.5). ROS subtracts in double,
+then wraps longitude; it does not reproduce overflowing signed int32 subtraction.
+No AUTO yaw, declination or body rotation is applied.
+
+The hardware source default is UBLOX (`pg/gps.c`); UBX NAV-PVT hMSL and NAV-POSLLH
+altitudeMslMm populate `gpsSol.llh.altCm`. SITL uses GPS_VIRTUAL, supplied by the
+Gazebo geographic altitude. The default altitude source permits GPS Z alongside
+barometer Z (`ALTITUDE_SOURCE_DEFAULT`, baro preference 100). Persisted board CLI
+can override these defaults and was not read from hardware. BARO_ONLY or other
+configurations without a captured GPS Z offset cannot support MSL goals; local
+control remains available. This mapping aligns coordinate definitions, not GNSS
+MSL or fused-altitude absolute accuracy. No fusion setting is changed here.
+
+The existing nonblocking scheduler attempts origin only on slots where neither
+ODOMETRY nor health was due, at 1 Hz and promptly after mapping/validity changes.
+Successful send records the snapshot and next 1-second deadline; UART congestion
+retries metadata on a later idle slot, with no queued state/control messages.
+ODOMETRY keeps priority and health retains its 5 ms stagger.
 
 ## BF_ESTIMATOR_HEALTH_V1
 

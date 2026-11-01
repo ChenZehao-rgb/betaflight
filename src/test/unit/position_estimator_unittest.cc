@@ -62,6 +62,8 @@ static float rfAltCm = 0.0f;
 static float baroAltCm = 0.0f;
 static timeUs_t fakeMicros = 0;
 static bool newGpsData = true;
+static float longitudeScale = 1.0f;
+float getGpsCosLat(void) { return longitudeScale; }
 
 bool sensors(uint32_t mask) { return (enabledSensors & mask) != 0; }
 bool rangefinderIsHealthy(void) { return rfHealthy; }
@@ -97,6 +99,7 @@ class PositionEstimatorTest : public ::testing::Test {
 protected:
     void SetUp() override
     {
+        longitudeScale = 1.0f;
         memset(&acc, 0, sizeof(acc));
         memset(&rMat, 0, sizeof(rMat));
         memset(&gpsSol, 0, sizeof(gpsSol));
@@ -349,4 +352,57 @@ TEST_F(PositionEstimatorTest, DisarmedXYInvalidAndNeverObservedAgesUnknown)
     EXPECT_EQ(0u,s->sourceFlags);
     EXPECT_FLOAT_EQ(1.0f,s->positionVariance[ENU_E]); // 10000 cm^2 -> 1 m^2.
     EXPECT_FLOAT_EQ(1.0f,s->velocityVariance[ENU_E]);
+}
+
+TEST_F(PositionEstimatorTest, GeographicSnapshotUsesIndependentZAndActualScale)
+{
+    // Establish Z while disarmed, before XY captures a different GPS altitude.
+    armingFlags = 0;
+    gpsSol.llh.altCm = 12300;
+    stepEstimator();
+    const auto reset = positionEstimatorGetSnapshot()->resetCounter;
+    EXPECT_FALSE(positionEstimatorGetSnapshot()->xyOriginValid);
+    EXPECT_TRUE(positionEstimatorGetSnapshot()->gpsZOriginValid);
+    stepEstimator();
+    EXPECT_EQ(reset, positionEstimatorGetSnapshot()->resetCounter);
+    armingFlags = ARMED;
+    gpsSol.llh.lat = 0; gpsSol.llh.lon = 0; gpsSol.llh.altCm = 45600;
+    longitudeScale = .75f; // Deliberately differs from cos(0).
+    stepEstimator();
+    auto s = *positionEstimatorGetSnapshot();
+    ASSERT_TRUE(s.xyOriginValid); ASSERT_TRUE(s.gpsZOriginValid);
+    EXPECT_EQ(0, s.originLatitude); EXPECT_EQ(0, s.originLongitude);
+    EXPECT_FLOAT_EQ(12300, s.gpsAltitudeOffsetCm);
+    EXPECT_FLOAT_EQ(.75f, s.longitudeScale);
+    EXPECT_EQ(reset + 1, s.resetCounter);
+    longitudeScale = .5f; // Same hook as a home scale update, no filter reinitialization.
+    EXPECT_FLOAT_EQ(.75f, positionEstimatorGetSnapshot()->longitudeScale); // Completed snapshot is immutable.
+    stepEstimator();
+    EXPECT_EQ(s.resetCounter + 1, positionEstimatorGetSnapshot()->resetCounter);
+    EXPECT_FLOAT_EQ(.5f, positionEstimatorGetSnapshot()->longitudeScale);
+    stepEstimator();
+    EXPECT_EQ(s.resetCounter + 1, positionEstimatorGetSnapshot()->resetCounter);
+    positionEstimatorResetZ();
+    stepEstimator();
+    EXPECT_EQ(s.resetCounter + 2, positionEstimatorGetSnapshot()->resetCounter);
+    EXPECT_FLOAT_EQ(45600, positionEstimatorGetSnapshot()->gpsAltitudeOffsetCm);
+    positionEstimatorResetXY();
+    gpsSol.llh.lat = 100;
+    stepEstimator();
+    EXPECT_EQ(s.resetCounter + 3, positionEstimatorGetSnapshot()->resetCounter);
+    EXPECT_EQ(0, positionEstimatorGetSnapshot()->originLatitude); // Reset captured before GPS moved.
+}
+
+TEST_F(PositionEstimatorTest, BarometerOnlyHasNoMslBaseline)
+{
+    positionConfigMutable()->altitude_source = ALTITUDE_SOURCE_BARO_ONLY;
+    stepEstimator();
+    EXPECT_FALSE(positionEstimatorGetSnapshot()->gpsZOriginValid);
+    const auto reset = positionEstimatorGetSnapshot()->resetCounter;
+    positionConfigMutable()->altitude_source = ALTITUDE_SOURCE_DEFAULT;
+    gpsSol.llh.altCm = 0;
+    stepEstimator();
+    EXPECT_TRUE(positionEstimatorGetSnapshot()->gpsZOriginValid);
+    EXPECT_FLOAT_EQ(0, positionEstimatorGetSnapshot()->gpsAltitudeOffsetCm);
+    EXPECT_EQ(reset, positionEstimatorGetSnapshot()->resetCounter); // First Z acquisition is not a reset.
 }

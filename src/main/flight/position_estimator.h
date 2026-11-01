@@ -92,6 +92,13 @@ typedef struct fcStateSnapshot_s {
     bool gpsFix;
     bool xyEnabled;
     bool present;
+    // Native GPS mapping captured with this completed update (not GPS home).
+    bool xyOriginValid;
+    bool gpsZOriginValid;
+    int32_t originLatitude;  // degE7
+    int32_t originLongitude; // degE7
+    float longitudeScale;   // Actual getGpsCosLat(), not cos(originLatitude).
+    float gpsAltitudeOffsetCm; // Independent MSL Z baseline, not armLocationGps.altCm.
 } fcStateSnapshot_t;
 
 // Cooperative scheduler only: producer and reader must not run concurrently.

@@ -18,57 +18,56 @@
  * If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include <stdbool.h>
+#include <cmath>
 
-#include "unittest_macros.h"
 #include "gtest/gtest.h"
+#include "unittest_macros.h"
 
 extern "C" {
 #include "sitl_gyro.h"
 }
 
-// Regression guard for #15294: PR #15280 dropped the ENABLE_GAZEBO_BRIDGE split
-// around the gyro Z assignment, silently inverting yaw on the (default) Gazebo
-// build. sitlGyroBodyFromSim() now carries the bridge-specific sign, so these
-// tests pin the yaw polarity for *both* bridges in a single binary.
-
-// Gazebo's IMU sensor frame is FRD: roll keeps X, pitch negates Y, yaw keeps Z.
-TEST(SitlGyroUnittest, GazeboBridgeMapping)
-{
-    const double rpy[3] = { 1.0, 2.0, 3.0 };
-    double roll, pitch, yaw;
-
-    sitlGyroBodyFromSim(rpy, true, &roll, &pitch, &yaw);
-
-    EXPECT_DOUBLE_EQ(roll,   1.0);   // +wx -> keep X
-    EXPECT_DOUBLE_EQ(pitch, -2.0);   // -wy -> negate Y
-    EXPECT_DOUBLE_EQ(yaw,    3.0);   // +wz -> keep Z (the bit #15280 broke)
+TEST(SitlGyroUnittest, SensorFrdToBodyFluAllSignedAxes) {
+	for (int axis = 0; axis < 3; ++axis) {
+		for (double sign : {-1.0, 1.0}) {
+			double sensor[3] = {0, 0, 0};
+			// An Rx(pi) sensor mount sees body +Y/+Z as sensor -Y/-Z.
+			sensor[axis] = axis == 0 ? sign : -sign;
+			double body[3];
+			sitlGyroBodyFromSim(sensor, &body[0], &body[1], &body[2]);
+			for (int i = 0; i < 3; ++i) {
+				EXPECT_DOUBLE_EQ(body[i], i == axis ? sign : 0.0);
+			}
+		}
+	}
 }
 
-// Legacy bridges (X-Plane, RealFlight) deliver yaw with the opposite polarity.
-TEST(SitlGyroUnittest, LegacyBridgeMapping)
-{
-    const double rpy[3] = { 1.0, 2.0, 3.0 };
-    double roll, pitch, yaw;
-
-    sitlGyroBodyFromSim(rpy, false, &roll, &pitch, &yaw);
-
-    EXPECT_DOUBLE_EQ(roll,   1.0);   // +wx -> keep X
-    EXPECT_DOUBLE_EQ(pitch, -2.0);   // -wy -> negate Y
-    EXPECT_DOUBLE_EQ(yaw,   -3.0);   // -wz -> negate Z
+static void eulerQuaternion(double roll, double pitch, double yaw, double q[4]) {
+	const double cr = cos(roll / 2), sr = sin(roll / 2);
+	const double cp = cos(pitch / 2), sp = sin(pitch / 2);
+	const double cy = cos(yaw / 2), sy = sin(yaw / 2);
+	q[0] = cr * cp * cy + sr * sp * sy;
+	q[1] = sr * cp * cy - cr * sp * sy;
+	q[2] = cr * sp * cy + sr * cp * sy;
+	q[3] = cr * cp * sy - sr * sp * cy;
 }
 
-// The defining property of the regression: a positive simulator yaw rate must
-// stay positive under Gazebo, and the two bridges must disagree on yaw sign.
-TEST(SitlGyroUnittest, YawSignDiffersByBridge)
-{
-    const double rpy[3] = { 0.0, 0.0, 1.0 };  // pure positive yaw rate
-    double roll, pitch, gazeboYaw, legacyYaw;
-
-    sitlGyroBodyFromSim(rpy, true,  &roll, &pitch, &gazeboYaw);
-    sitlGyroBodyFromSim(rpy, false, &roll, &pitch, &legacyYaw);
-
-    EXPECT_GT(gazeboYaw, 0.0);                 // Gazebo preserves yaw direction
-    EXPECT_LT(legacyYaw, 0.0);                 // legacy inverts it
-    EXPECT_DOUBLE_EQ(gazeboYaw, -legacyYaw);   // exact opposites
+TEST(SitlGyroUnittest, GazeboAttitudeHasCorrectWorldAndBodyFrames) {
+	// Compass headings, wrap boundary, and tilted attitudes: a yaw-only test
+	// cannot detect an incorrect body-frame conjugation.
+	for (double yaw : {-M_PI, -M_PI / 2, -0.3, 0.0, 0.3, M_PI / 2, M_PI}) {
+		for (double roll : {-0.4, 0.0, 0.4}) {
+			for (double pitch : {-0.2, 0.0, 0.2}) {
+				double world[4], expected[4];
+				eulerQuaternion(roll, pitch, yaw, world);
+				eulerQuaternion(roll, pitch, yaw - M_PI / 2, expected);
+				const double packet[4] = {world[0], world[1], -world[2], -world[3]};
+				float actual[4];
+				sitlAttitudeFromGazebo(packet, &actual[0], &actual[1], &actual[2], &actual[3]);
+				for (int i = 0; i < 4; ++i) {
+					EXPECT_NEAR(actual[i], expected[i], 1e-7);
+				}
+			}
+		}
+	}
 }

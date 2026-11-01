@@ -109,3 +109,20 @@ void mavlinkPackEstimatorHealth(mavlink_message_t *msg, struct __mavlink_status 
     mavlink_msg_v2_extension_pack_status(1, MAV_COMP_ID_AUTOPILOT1, status, msg, 0, 0, 0,
         BF_ESTIMATOR_HEALTH_TYPE, payload);
 }
+
+void mavlinkPackGeographicOrigin(mavlink_message_t *msg, struct __mavlink_status *status, const fcStateSnapshot_t *s)
+{
+    uint8_t payload[249] = {0};
+    payload[0] = 1;
+    payload[1] = BF_GEOGRAPHIC_ORIGIN_LENGTH;
+    putLE(payload+2, s->present ? (s->xyOriginValid | s->gpsZOriginValid << 1) : 0, 2);
+    putLE(payload+4, s->resetCounter, 4);
+    putLE(payload+8, s->timeUs, 8);
+    putLE(payload+16, (uint32_t)s->originLatitude, 4);
+    putLE(payload+20, (uint32_t)s->originLongitude, 4);
+    putFloat(payload+24, s->longitudeScale);
+    putFloat(payload+28, s->gpsAltitudeOffsetCm);
+    status->flags &= ~MAVLINK_STATUS_FLAG_OUT_MAVLINK1;
+    mavlink_msg_v2_extension_pack_status(1, MAV_COMP_ID_AUTOPILOT1, status, msg, 0, 0, 0,
+        BF_GEOGRAPHIC_ORIGIN_TYPE, payload);
+}

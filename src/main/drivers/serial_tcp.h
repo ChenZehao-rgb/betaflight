@@ -32,6 +32,9 @@ typedef struct {
     serialPort_t port;
     uint8_t rxBuffer[RX_BUFFER_SIZE];
     uint8_t txBuffer[TX_BUFFER_SIZE];
+    // End-of-byte times on the simulated 8N1 UART, in host monotonic usec.
+    double txReady[TX_BUFFER_SIZE];
+    double txWireTime;
 
     dyad_Stream *serv;
     dyad_Stream *conn;
@@ -47,6 +50,7 @@ serialPort_t *serTcpOpen(serialPortIdentifier_e id, serialReceiveCallbackPtr rxC
 // tcpPort API
 void tcpDataIn(tcpPort_t *instance, uint8_t* ch, int size);
 void tcpDataOut(tcpPort_t *instance);
+void tcpUpdate(void);
 
 bool tcpIsStart(void);
 bool* tcpGetUsed(void);
